@@ -191,7 +191,7 @@ class InteractivePickPlaceController(Node):
         collision_object.id = object_name
 
         # Calculate height from table (z=0.34 is table height)
-        height = max(0.05, (pose.position.z - 0.34) * 2)
+        height = (pose.position.z - 0.09) * 2
         
         # Define cylinder
         cylinder = SolidPrimitive()
@@ -353,9 +353,11 @@ class InteractivePickPlaceController(Node):
     def pick_object(self, object_name, grasp_pose, marker_id, approach_direction="side"):
         """Execute pick operation"""
         # Step 1: Move to approach pose
-        approach_pose = self.compute_approach_pose(grasp_pose, distance=0.20, direction=approach_direction)
-        
-        self.get_logger().info("Step 1: Moving to approach pose...")
+        initial_x = grasp_pose.position.x
+        approach_distance = 0.20
+        approach_pose = self.compute_approach_pose(grasp_pose, distance=approach_distance, direction=approach_direction)
+
+        self.get_logger().info(f"Step 1: Moving to approach pose that are {approach_distance} away along x-axis...")
         if not self.move_to_pose(approach_pose):
             return False
         
@@ -370,8 +372,9 @@ class InteractivePickPlaceController(Node):
         self.attach_object_to_gripper(object_name)
         
         # Step 4: Move closer
-        approach_pose.position.x += 0.10
-        self.get_logger().info("Step 4: Moving closer to object...")
+        grasp_distance = 0.17
+        approach_pose.position.x += grasp_distance
+        self.get_logger().info(f"Step 4: Moving closer to object that are {approach_distance - grasp_distance}cm")
         if not self.move_to_pose(approach_pose):
             return False
         
@@ -572,32 +575,49 @@ def main(args=None):
     controller.add_table_collision_object("wheel_chair_back", x=chair_back_x, y=chair_back_y, z=chair_back_z, 
                                          width=chair_back_width, depth=chair_back_depth, height=chair_back_height)
     
-    table_x = 0.7
-    table_y = -0.3
-    table_z = -0.02
-    # table_height = 0.72
-    table_height = 0.78
+    table_depth = 0.765
+    table_dx = 0.22
+    table_width = -1
+    table_dy = -0.47
+    table_height = 0.715
+    table_dz = -0.37
+    table_x = table_depth / 2 + table_dx
+    table_y = table_width / 2 + table_dy
+    table_z = table_height / 2 + table_dz
     controller.add_table_collision_object("big_table", x=table_x, y=table_y, z=table_z, 
-                                         width=0.8, depth=1.2, height=table_height)
-    
+                                         width=math.fabs(table_width), depth=table_depth, height=table_height)
+
 
     table1_depth = 0.55
-    table1_x = 0.275
+    table1_dx = 0.345
     table1_width = 0.55
-    table1_y = 0.605
+    table1_dy = -0.285
     table1_height = 0.46
-    table1_z = -0.14
-    # table_height = 0.72
-    table1_height = 0.78
+    table1_dz = -0.37
+    table1_x = table1_depth / 2 + table1_dx
+    table1_y = table1_depth / 2 + table1_dy
+    table1_z = table1_height / 2 + table1_dz
     controller.add_table_collision_object("small_table", x=table1_x, y=table1_y, z=table1_z, 
                                          width=table1_width, depth=table1_depth, height=table1_height)
 
 
+    ceiling_depth = 1.0
+    ceiling_dx = 0.01
+    ceiling_width = 1.5
+    ceiling_dy = -0.5
+    ceiling_height = 0.3
+    ceiling_dz = 0.6
+    ceiling_x = ceiling_depth / 2 + ceiling_dx
+    ceiling_y = ceiling_depth / 2 + ceiling_dy
+    ceiling_z = ceiling_height / 2 + ceiling_dz
+    controller.add_table_collision_object("ceiling", x=ceiling_x, y=ceiling_y, z=ceiling_z, 
+                                         width=ceiling_width, depth=ceiling_depth, height=ceiling_height)
+
     # controller.add_table_collision_object("separator", x=0.7, y=0.3, z=0.8, 
     #                                      width=0.5, depth=0.2, height=1.0)
     
-    controller.add_table_collision_object("separator1", x=0.7, y=-0.7, z=0.8, 
-                                         width=0.5, depth=0.2, height=1.0)
+    # controller.add_table_collision_object("separator1", x=0.7, y=-0.7, z=0.8, 
+                                        #  width=0.5, depth=0.2, height=1.0)
     controller.get_logger().info("Static environment added")
     
     # Wait for valid pose before executing
