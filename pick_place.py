@@ -576,9 +576,9 @@ def main(args=None):
                                          width=chair_back_width, depth=chair_back_depth, height=chair_back_height)
     
     table_depth = 0.765
-    table_dx = 0.22
+    table_dx = 0.13
     table_width = -1
-    table_dy = -0.47
+    table_dy = -0.53
     table_height = 0.715
     table_dz = -0.37
     table_x = table_depth / 2 + table_dx
@@ -589,9 +589,9 @@ def main(args=None):
 
 
     table1_depth = 0.55
-    table1_dx = 0.345
+    table1_dx = 0.295
     table1_width = 0.55
-    table1_dy = -0.285
+    table1_dy = -0.315
     table1_height = 0.46
     table1_dz = -0.37
     table1_x = table1_depth / 2 + table1_dx
@@ -599,6 +599,19 @@ def main(args=None):
     table1_z = table1_height / 2 + table1_dz
     controller.add_table_collision_object("small_table", x=table1_x, y=table1_y, z=table1_z, 
                                          width=table1_width, depth=table1_depth, height=table1_height)
+    
+
+    wall_depth = 0.3
+    wall_dx = 0.86
+    wall_width = 20.0
+    wall_dy = -15.0
+    wall_height = 4.0
+    wall_dz = -0.37
+    wall_x = wall_depth / 2 + wall_dx
+    wall_y = wall_depth / 2 + wall_dy
+    wall_z = wall_height / 2 + wall_dz
+    controller.add_table_collision_object("wall", x=wall_x, y=wall_y, z=wall_z, 
+                                         width=wall_width, depth=wall_depth, height=wall_height)
 
 
     ceiling_depth = 1.0
