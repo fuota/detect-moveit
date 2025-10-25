@@ -182,6 +182,89 @@ class RealDetectionPickPlaceController(MoveItController):
         print("="*60)
     
     # ==================== PICK EXECUTION ====================
+    def execute_pick_and_place_sequence(self, marker_id, place_offset_x=0.0, place_offset_y = 0.2, place_offset_z=0.0):
+        """
+        Execute complete pick and place sequence for selected object
+        
+        Args:
+            marker_id: ArUco marker ID to pick
+            place_offset_y: Y-axis offset for place location (default: 0.2m)
+        
+        Returns:
+            bool: True if both pick and place succeed
+        """
+        # CRITICAL: Set movement flag to block all updates
+        self.is_moving = True
+        self.get_logger().info("🔒 Movement started - blocking all pose updates")
+        
+        self.get_logger().info(f"\n{'='*60}")
+        self.get_logger().info(f"Starting pick and place sequence for marker {marker_id}")
+        self.get_logger().info(f"{'='*60}")
+        
+        obj_data = self.detected_objects.get(marker_id)
+        if not obj_data or not obj_data.get('pose'):
+            self.get_logger().error("No pose data available!")
+            self.is_moving = False
+            return False
+        
+        grasp_pose = obj_data['pose']
+        object_name = f"detected_object_{marker_id}"
+        
+        # ==================== PICK PHASE ====================
+        self.get_logger().info("\n--- PICK PHASE ---")
+        pick_success = self.pick_object(object_name, grasp_pose)
+        
+        if not pick_success:
+            self.get_logger().error("✗ Pick operation failed!")
+            print("\n✗ Pick failed!")
+            self.is_moving = False
+            self.get_logger().info("🔓 Movement completed - resuming pose updates")
+            return False
+        
+        self.get_logger().info("✓ Pick operation completed successfully!")
+        print("\n✓ Object picked successfully!")
+        
+        # ==================== PLACE PHASE ====================
+        self.get_logger().info("\n--- PLACE PHASE ---")
+        
+        # Get current pose after pick
+        current_pose = self.get_current_pose()
+        if not current_pose:
+            self.get_logger().error("Failed to get current pose after pick!")
+            self.is_moving = False
+            self.get_logger().info("🔓 Movement completed - resuming pose updates")
+            return False
+        
+        self.get_logger().info(
+            f"Current pose after pick: x={current_pose.position.x:.3f}, "
+            f"y={current_pose.position.y:.3f}, z={current_pose.position.z:.3f}")
+        
+        # Calculate place pose (offset in Y direction)
+        place_pose = Pose()
+        place_pose.position.x = current_pose.position.x + place_offset_x
+        place_pose.position.y = current_pose.position.y + place_offset_y
+        place_pose.position.z = current_pose.position.z + place_offset_z
+        place_pose.orientation = current_pose.orientation
+        
+        self.get_logger().info(
+            f"Target place pose: x={place_pose.position.x:.3f}, "
+            f"y={place_pose.position.y:.3f}, z={place_pose.position.z:.3f}")
+        
+        # Execute place
+        place_success = self.place_object(object_name, place_pose)
+        
+        # CRITICAL: Release movement flag to allow updates again
+        self.is_moving = False
+        self.get_logger().info("🔓 Movement completed - resuming pose updates")
+        
+        if place_success:
+            self.get_logger().info("\n🎉 Place successful! Pick and place operation completed.")
+            print("\n🎉 Pick and place completed successfully!")
+        else:
+            self.get_logger().error("✗ Place operation failed!")
+            print("\n✗ Place failed!")
+        
+        return place_success
     
     def execute_pick_sequence(self, marker_id):
         """Execute complete pick sequence for selected object"""
@@ -203,19 +286,25 @@ class RealDetectionPickPlaceController(MoveItController):
         object_name = f"detected_object_{marker_id}"
         
         # Execute pick using parent class method
-        success = self.pick_object(object_name, grasp_pose)
-        
-        # CRITICAL: Release movement flag to allow updates again
-        self.is_moving = False
-        self.get_logger().info("🔓 Movement completed - resuming pose updates")
-        
-        if success:
-            self.get_logger().info("✓ Pick sequence completed successfully!")
-            print("\n✓ Object picked successfully!")
+        if self.pick_object("cylinder_object", grasp_pose):
+            self.get_logger().info("\n🎉 Pick successful!")
+
+            current_pose = self.get_current_pose()
+            if current_pose:
+                self.get_logger().info(f"Current pose after pick: x={current_pose.position.x:.3f}, y={current_pose.position.y:.3f}, z={current_pose.position.z:.3f}")
+                # Place 
+                place_pose = current_pose
+                place_pose.position.y = current_pose.position.y + 0.2
+
+                if self.place_object("cylinder_object", place_pose):
+                    self.get_logger().info("\n🎉 Place successful! Pick and place operation completed.")
+                else:
+                    self.get_logger().error("Place operation failed.")
+            else:
+                self.get_logger().error("Failed to get current pose after pick.")
         else:
-            self.get_logger().error("✗ Pick sequence failed!")
-            print("\n✗ Pick failed!")
-        
+            self.get_logger().error("\n❌ Pick operation failed.")
+            
         return success
     
     # ==================== ENVIRONMENT SETUP ====================
@@ -285,7 +374,7 @@ def main(args=None):
         controller.display_detected_objects()
         
         # Execute pick for marker ID 6
-        controller.execute_pick_sequence(6)
+        controller.execute_pick_and_place_sequence(6)
     else:
         controller.get_logger().error("Failed to receive valid pose - aborting")
     
