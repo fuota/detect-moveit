@@ -223,8 +223,8 @@ class RealDetectionPickPlaceController(MoveItController):
         """Add a real-world object as a collision box"""
         self.add_box_collision_object(
             name,
-            x=dx + depth / 2,
-            y=dy + width / 2,
+            x=dx + width / 2,
+            y=dy + depth / 2,
             z=dz + height / 2,
             width=math.fabs(width),
             depth=math.fabs(depth),
@@ -260,70 +260,14 @@ class RealDetectionPickPlaceController(MoveItController):
             width=chair_back_width, depth=chair_back_depth, height=chair_back_height)
         
         # Big table
-        # self.add_real_object("big_table",dx=0.13, dy=-0.53, dz=-0.37, width=-1, depth=0.765, height=0.715)
-        table_depth = 0.765
-        table_dx = 0.13
-        table_width = -1
-        table_dy = -0.53
-        table_height = 0.715    
-        table_dz = -0.37
-        table_x = table_depth / 2 + table_dx
-        table_y = table_width / 2 + table_dy
-        table_z = table_height / 2 + table_dz
-        self.add_box_collision_object(
-            "big_table", 
-            x=table_x, y=table_y, z=table_z, 
-            width=math.fabs(table_width), depth=table_depth, height=table_height)
+        self.add_real_object("big_table",dx=0.18, dy=-0.49, dz=-0.37, width=0.765, depth=-1, height=0.715)
         
         # Small table
-        # self.add_real_object("small_table", dx=0.295, dy=-0.315, dz=-0.37, width=0.55, depth=0.55, height=0.46)
-        table1_depth = 0.55
-        table1_dx = 0.295
-        table1_width = 0.55
-        table1_dy = -0.315
-        table1_height = 0.46
-        table1_dz = -0.37
-        table1_x = table1_depth / 2 + table1_dx
-        table1_y = table1_depth / 2 + table1_dy
-        table1_z = table1_height / 2 + table1_dz
-        self.add_box_collision_object(
-            "small_table", 
-            x=table1_x, y=table1_y, z=table1_z, 
-            width=table1_width, depth=table1_depth, height=table1_height)
+        self.add_real_object("small_table", dx=0.38, dy=-0.28, dz=-0.37, width=0.55, depth=0.55, height=0.46)
+    
         
         # Wall
-        # self.add_real_object("wall", dx=0.85, dy=-7.0, dz=-0.37, width=15.0, depth=0.3, height=4.0)
-        # self.add_real_object("wall", dx=-7.0, dy=1.2, dz=-0.37, width=0.3, depth=15.0, height=4.0)
-
-        # wall_depth = 0.3
-        # wall_dx = 0.85
-        # wall_width = 15.0
-        # wall_dy = -7.0
-        # wall_height = 4.0
-        # wall_dz = -0.37
-        # wall_x = wall_depth / 2 + wall_dx
-        # wall_y = wall_depth / 2 + wall_dy
-        # wall_z = wall_height / 2 + wall_dz
-        # self.add_box_collision_object(
-        #     "wall", 
-        #     x=wall_x, y=wall_y, z=wall_z, 
-        #     width=wall_width, depth=wall_depth, height=wall_height)
-        
-        # Ceiling
-        # self.add_real_object("ceiling", dx=0.0, dy=-0.5, dz=0.6, width=1.5, depth=0.01, height=0.3)
-        # ceiling_depth = 1.0
-        # ceiling_dx = 0.01
-        # ceiling_width = 1.5
-        # ceiling_dy = -0.5
-        # ceiling_height = 0.3
-        # ceiling_dz = 0.6
-        # ceiling_x = ceiling_depth / 2 + ceiling_dx
-        # ceiling_y = ceiling_depth / 2 + ceiling_dy
-        # ceiling_z = ceiling_height / 2 + ceiling_dz
-        # self.add_box_collision_object(
-        #     "ceiling", 
-        #     x=ceiling_x, y=ceiling_y, z=ceiling_z, 
-        #     width=ceiling_width, depth=ceiling_depth, height=ceiling_height)
+        self.add_real_object("wall", dx=1, dy=-7.0, dz=-0.37, width=0.3, depth=15, height=4.0)
         
         self.get_logger().info("✓ Static environment added")
 
