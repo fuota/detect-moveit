@@ -267,7 +267,16 @@ class RealDetectionPickPlaceController(MoveItController):
         return place_success
     
     def execute_pick_sequence(self, marker_id):
-        """Execute complete pick sequence for selected object"""
+        """
+        Execute only pick sequence (backward compatibility)
+        For pick and place, use execute_pick_and_place_sequence()
+        
+        Args:
+            marker_id: ArUco marker ID to pick
+        
+        Returns:
+            bool: True if pick succeeds
+        """
         # CRITICAL: Set movement flag to block all updates
         self.is_moving = True
         self.get_logger().info("🔒 Movement started - blocking all pose updates")
@@ -286,25 +295,19 @@ class RealDetectionPickPlaceController(MoveItController):
         object_name = f"detected_object_{marker_id}"
         
         # Execute pick using parent class method
-        if self.pick_object("cylinder_object", grasp_pose):
-            self.get_logger().info("\n🎉 Pick successful!")
-
-            current_pose = self.get_current_pose()
-            if current_pose:
-                self.get_logger().info(f"Current pose after pick: x={current_pose.position.x:.3f}, y={current_pose.position.y:.3f}, z={current_pose.position.z:.3f}")
-                # Place 
-                place_pose = current_pose
-                place_pose.position.y = current_pose.position.y + 0.2
-
-                if self.place_object("cylinder_object", place_pose):
-                    self.get_logger().info("\n🎉 Place successful! Pick and place operation completed.")
-                else:
-                    self.get_logger().error("Place operation failed.")
-            else:
-                self.get_logger().error("Failed to get current pose after pick.")
+        success = self.pick_object(object_name, grasp_pose)
+        
+        # CRITICAL: Release movement flag to allow updates again
+        self.is_moving = False
+        self.get_logger().info("🔓 Movement completed - resuming pose updates")
+        
+        if success:
+            self.get_logger().info("✓ Pick sequence completed successfully!")
+            print("\n✓ Object picked successfully!")
         else:
-            self.get_logger().error("\n❌ Pick operation failed.")
-            
+            self.get_logger().error("✗ Pick sequence failed!")
+            print("\n✗ Pick failed!")
+        
         return success
     
     # ==================== ENVIRONMENT SETUP ====================
