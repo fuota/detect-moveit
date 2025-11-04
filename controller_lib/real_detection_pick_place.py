@@ -33,6 +33,7 @@ class RealDetectionPickPlaceController(MoveItController):
         # Detected objects storage
         self.detected_objects = {}  # {marker_id: {'pose': Pose, 'name': str}}
         self.marker_ids = []
+        self.picked_objects = set()  # Track which objects were picked
         
         # Movement state - CRITICAL: blocks updates during movement
         self.is_moving = False
@@ -69,11 +70,13 @@ class RealDetectionPickPlaceController(MoveItController):
         if len(msg.poses) != len(self.marker_ids):
             return
         
-        # Update poses
+        # Update poses ONLY for currently visible objects
         for i, marker_id in enumerate(self.marker_ids):
             if marker_id in self.detected_objects:
                 self.detected_objects[marker_id]['pose'] = msg.poses[i]
-                self.update_collision_cylinder(marker_id, msg.poses[i])
+                # CHANGE THIS LINE - don't update collision if picked:
+                if marker_id not in self.picked_objects:
+                    self.update_collision_cylinder(marker_id, msg.poses[i])
         
         # Mark that we have received valid poses
         if len(msg.poses) > 0:
@@ -87,16 +90,17 @@ class RealDetectionPickPlaceController(MoveItController):
          
         new_ids = list(msg.data)
         
-        # Remove objects that are no longer detected
-        removed_ids = set(self.marker_ids) - set(new_ids)
-        for marker_id in removed_ids:
-            self.remove_detected_object_collision(marker_id)
-            if marker_id in self.detected_objects:
-                del self.detected_objects[marker_id]
+        # # Remove objects that are no longer detected
+        # removed_ids = set(self.marker_ids) - set(new_ids)
+        # for marker_id in removed_ids:
+        #     self.remove_detected_object_collision(marker_id)
+        #     if marker_id in self.detected_objects:
+        #         del self.detected_objects[marker_id]
         
-        self.marker_ids = new_ids
+        # self.marker_ids = new_ids
         
         # Initialize new objects
+        self.marker_ids = new_ids
         for marker_id in self.marker_ids:
             if marker_id not in self.detected_objects:
                 self.detected_objects[marker_id] = {
@@ -124,7 +128,7 @@ class RealDetectionPickPlaceController(MoveItController):
         object_name = f"detected_object_{marker_id}"
         
         # Calculate height from table (z=0.09 is reference)
-        height = (pose.position.z - 0.09) * 2
+        height = (pose.position.z - 0.29) * 2
         
         # Add/update cylinder using parent class method
         self.add_cylinder_collision_object(
@@ -221,6 +225,9 @@ class RealDetectionPickPlaceController(MoveItController):
             self.get_logger().info("🔓 Movement completed - resuming pose updates")
             return False
         
+        self.picked_objects.add(marker_id)
+        self.remove_detected_object_collision(marker_id)
+        
         self.get_logger().info("✓ Pick operation completed successfully!")
         print("\n✓ Object picked successfully!")
         
@@ -252,6 +259,12 @@ class RealDetectionPickPlaceController(MoveItController):
         
         # Execute place
         place_success = self.place_object(object_name, place_pose)
+        if place_success:
+            # Update the stored pose to the new location
+            self.detected_objects[marker_id]['pose'] = place_pose
+            self.picked_objects.discard(marker_id)  # No longer in gripper
+            self.update_collision_cylinder(marker_id, place_pose)  # Immediately add collision at placed location
+
         
         # CRITICAL: Release movement flag to allow updates again
         self.is_moving = False
@@ -296,7 +309,10 @@ class RealDetectionPickPlaceController(MoveItController):
         
         # Execute pick using parent class method
         success = self.pick_object(object_name, grasp_pose)
-        
+        if success:
+            self.picked_objects.add(marker_id)
+            self.remove_detected_object_collision(marker_id)
+                
         # CRITICAL: Release movement flag to allow updates again
         self.is_moving = False
         self.get_logger().info("🔓 Movement completed - resuming pose updates")
@@ -355,7 +371,7 @@ class RealDetectionPickPlaceController(MoveItController):
         self.add_real_object("big_table",dx=0.18, dy=-0.49, dz=-0.37, width=0.765, depth=-1, height=0.715)
         
         # Small table
-        self.add_real_object("small_table", dx=0.38, dy=-0.28, dz=-0.37, width=0.55, depth=0.55, height=0.46)
+        self.add_real_object("small_table", dx=0.38, dy=-0.28, dz=-0.37, width=0.55, depth=0.55, height=0.66)
     
         
         # Wall
