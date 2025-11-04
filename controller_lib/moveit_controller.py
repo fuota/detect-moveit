@@ -177,63 +177,124 @@ class MoveItController(Node):
     
     # ==================== MOTION PLANNING ====================
     
-    def move_to_pose(self, target_pose, planning_time=5.0):
-        """Move arm to target pose using standard motion planning"""
-        goal = MoveGroup.Goal()
-        goal.request.group_name = self.arm_group_name
-        goal.request.num_planning_attempts = 12
-        goal.request.allowed_planning_time = planning_time
-        goal.request.max_velocity_scaling_factor = 0.1
-        goal.request.max_acceleration_scaling_factor = 0.1
-        
-        constraints = Constraints()
-        
-        # Position constraint
-        pos_constraint = PositionConstraint()
-        pos_constraint.header.frame_id = self.base_frame
-        pos_constraint.link_name = self.end_effector_frame
-        pos_constraint.constraint_region.primitives.append(SolidPrimitive())
-        pos_constraint.constraint_region.primitives[0].type = SolidPrimitive.BOX
-        pos_constraint.constraint_region.primitives[0].dimensions = [0.02, 0.02, 0.02]
-        pos_constraint.constraint_region.primitive_poses.append(target_pose)
-        pos_constraint.weight = 1.0
-        constraints.position_constraints.append(pos_constraint)
-        
-        # Orientation constraint
-        orient_constraint = OrientationConstraint()
-        orient_constraint.header.frame_id = self.base_frame
-        orient_constraint.link_name = self.end_effector_frame
-        orient_constraint.orientation = target_pose.orientation
-        orient_constraint.absolute_x_axis_tolerance = 0.005
-        orient_constraint.absolute_y_axis_tolerance = 0.005
-        orient_constraint.absolute_z_axis_tolerance = 0.005
-        orient_constraint.weight = 1.0
-        constraints.orientation_constraints.append(orient_constraint)
-        
-        goal.request.goal_constraints.append(constraints)
-        
-        self.get_logger().info("Sending move goal...")
-        future = self.move_group_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future)
-        
-        goal_handle = future.result()
-        if not goal_handle.accepted:
-            self.get_logger().error("Move goal rejected")
-            return False
-        
-        self.get_logger().info("Move goal accepted, executing...")
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
-        
-        result = result_future.result()
-        success = result.result.error_code.val == MoveItErrorCodes.SUCCESS
-        
-        if success:
-            self.get_logger().info("✓ Move completed successfully")
-        else:
-            self.get_logger().error(f"✗ Move failed: {result.result.error_code.val}")
-        
-        return success
+    def move_to_pose(self, target_pose, planning_time=5.0, max_retries=4):
+        """Move arm to target pose; auto-retry if MoveIt returns INVALID_MOTION_PLAN."""
+        for attempt in range(1, max_retries + 1):
+            # Gradually relax constraints each attempt
+            box = 0.02 + 0.01 * (attempt - 1)      # 2cm → 5cm
+            ori_tol = 0.005 + 0.005 * (attempt - 1)  # 0.005rad → 0.02rad
+
+            goal = MoveGroup.Goal()
+            goal.request.group_name = self.arm_group_name
+            goal.request.num_planning_attempts = 12
+            goal.request.allowed_planning_time = planning_time
+            goal.request.max_velocity_scaling_factor = 0.15
+            goal.request.max_acceleration_scaling_factor = 0.15
+
+            # Hint MoveGroup to replan internally if its validation fails
+            try:
+                goal.planning_options.replan = True
+                goal.planning_options.replan_attempts = 2
+                goal.planning_options.replan_delay = 0.1
+            except Exception:
+                pass
+
+            constraints = Constraints()
+
+            # Position box around target
+            pos_constraint = PositionConstraint()
+            pos_constraint.header.frame_id = self.base_frame
+            pos_constraint.link_name = self.end_effector_frame
+            pos_prim = SolidPrimitive()
+            pos_prim.type = SolidPrimitive.BOX
+            pos_prim.dimensions = [box, box, box]
+            pos_constraint.constraint_region.primitives.append(pos_prim)
+            pos_constraint.constraint_region.primitive_poses.append(target_pose)
+            pos_constraint.weight = 1.0
+            constraints.position_constraints.append(pos_constraint)
+
+            # Orientation tolerance
+            orient_constraint = OrientationConstraint()
+            orient_constraint.header.frame_id = self.base_frame
+            orient_constraint.link_name = self.end_effector_frame
+            orient_constraint.orientation = target_pose.orientation
+            orient_constraint.absolute_x_axis_tolerance = ori_tol
+            orient_constraint.absolute_y_axis_tolerance = ori_tol
+            orient_constraint.absolute_z_axis_tolerance = ori_tol
+            orient_constraint.weight = 1.0
+            constraints.orientation_constraints.append(orient_constraint)
+
+            goal.request.goal_constraints = [constraints]
+
+            self.get_logger().info(
+                f"Sending move goal (attempt {attempt}/{max_retries}) "
+                f"box={box:.3f}m ori_tol={ori_tol:.3f}rad")
+
+            future = self.move_group_client.send_goal_async(goal)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+            if not future.done():
+                self.get_logger().warn("Move goal send timed out; retrying...")
+                continue
+
+            goal_handle = future.result()
+            if not goal_handle or not goal_handle.accepted:
+                self.get_logger().warn("Move goal rejected; retrying...")
+                time.sleep(0.05)
+                continue
+
+            result_future = goal_handle.get_result_async()
+            rclpy.spin_until_future_complete(self, result_future, timeout_sec=planning_time + 30.0)
+            if not result_future.done():
+                self.get_logger().warn("Move result timeout; retrying...")
+                continue
+
+            result = result_future.result()
+            code = result.result.error_code.val
+            code_str = self._error_to_string(code)
+
+            if code == MoveItErrorCodes.SUCCESS:
+                self.get_logger().info("✓ Move completed successfully")
+                return True
+
+            self.get_logger().warn(f"✗ Move failed with {code_str} (code {code}); retrying...")
+
+            # Abort early on definitively invalid start/goal conditions
+            if code in (
+                MoveItErrorCodes.START_STATE_IN_COLLISION,
+                MoveItErrorCodes.GOAL_IN_COLLISION,
+                MoveItErrorCodes.GOAL_CONSTRAINTS_VIOLATED,
+                MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS,
+                MoveItErrorCodes.INVALID_ROBOT_STATE,
+            ):
+                self.get_logger().error("Start/goal invalid; adjust pose/scene and retry later.")
+                return False
+
+            # Otherwise (INVALID_MOTION_PLAN, PLANNING_FAILED, FAILURE, environment change) -> loop
+            time.sleep(0.05)
+
+        self.get_logger().error("All planning retries exhausted.")
+        return False
+    
+    #===================== ERROR CODES ====================
+    def _error_to_string(self, code: int) -> str:
+        mapping = {
+            MoveItErrorCodes.SUCCESS: "SUCCESS",
+            MoveItErrorCodes.FAILURE: "FAILURE",
+            MoveItErrorCodes.PLANNING_FAILED: "PLANNING_FAILED",
+            MoveItErrorCodes.INVALID_MOTION_PLAN: "INVALID_MOTION_PLAN",
+            MoveItErrorCodes.MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE:
+                "MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE",
+            MoveItErrorCodes.START_STATE_IN_COLLISION: "START_STATE_IN_COLLISION",
+            MoveItErrorCodes.START_STATE_VIOLATES_PATH_CONSTRAINTS: "START_STATE_VIOLATES_PATH_CONSTRAINTS",
+            MoveItErrorCodes.GOAL_IN_COLLISION: "GOAL_IN_COLLISION",
+            MoveItErrorCodes.GOAL_VIOLATES_PATH_CONSTRAINTS: "GOAL_VIOLATES_PATH_CONSTRAINTS",
+            MoveItErrorCodes.GOAL_CONSTRAINTS_VIOLATED: "GOAL_CONSTRAINTS_VIOLATED",
+            MoveItErrorCodes.INVALID_GROUP_NAME: "INVALID_GROUP_NAME",
+            MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS: "INVALID_GOAL_CONSTRAINTS",
+            MoveItErrorCodes.INVALID_ROBOT_STATE: "INVALID_ROBOT_STATE",
+            MoveItErrorCodes.NO_IK_SOLUTION: "NO_IK_SOLUTION",
+        }
+        return mapping.get(code, f"UNKNOWN({code})")
     
     # ==================== CARTESIAN PLANNING ====================
     
@@ -680,7 +741,7 @@ class MoveItController(Node):
         self.get_logger().info("✓ Pick operation completed successfully")
         return True
     
-    def place_object(self, object_name, place_pose, retreat_distance=0.10):
+    def place_object(self, object_name, place_pose, retreat_distance=0.08):
         """
         Execute complete place operation
         
@@ -696,10 +757,19 @@ class MoveItController(Node):
         
         # Step 1: Move to place pose
         self.get_logger().info("Step 1: Moving to place pose...")
-        if not self.move_to_pose(place_pose):
-            self.get_logger().error("Failed to reach place pose")
-            return False
-        
+        #  self.get_logger().info(f"Step 6: Lifting object using Cartesian path ({lift_distance}m)...")
+        current_pose = self.get_current_pose()
+        dx = place_pose.position.x - current_pose.position.x
+        dy = place_pose.position.y - current_pose.position.y
+        dz = place_pose.position.z - current_pose.position.z
+        if self.cartesian_available and not self.move_relative_cartesian(delta_x=dx, delta_y=dy, delta_z=dz):
+            self.get_logger().warn("Cartesian lift failed, using standard planning")
+            if not self.move_to_pose(place_pose):
+                return False
+        elif not self.cartesian_available:
+            if not self.move_to_pose(place_pose):
+                return False
+            
         # Step 2: Open gripper
         self.get_logger().info("Step 2: Opening gripper to release object...")
         if not self.open_gripper():
@@ -707,12 +777,31 @@ class MoveItController(Node):
             return False
         time.sleep(1.0)
         
-        # Step 3: Detach object
-        self.get_logger().info("Step 3: Detaching object from gripper...")
+        #Step 3: Lower object slightly to ensure release
+        self.get_logger().info("Step 3: Lowering object slightly to ensure release...")
+        if self.cartesian_available and not self.move_relative_cartesian(delta_z= -retreat_distance):
+            self.get_logger().warn("Cartesian lower failed, using standard planning")
+            current_pose = self.get_current_pose()
+            if current_pose:
+                current_pose.position.z -= retreat_distance
+                if not self.move_to_pose(current_pose):
+                    return False
+            else:
+                return False
+        elif not self.cartesian_available:
+            current_pose = self.get_current_pose()
+            if current_pose:
+                current_pose.position.z -= retreat_distance
+                if not self.move_to_pose(current_pose):
+                    return False
+            else:
+                return False
+        # Step 4: Detach object
+        self.get_logger().info("Step 4: Detaching object from gripper...")
         self.detach_object_from_gripper(object_name)
-        
-        # Step 4: Retreat using Cartesian path
-        self.get_logger().info(f"Step 4: Retreating ({retreat_distance}m)...")
+
+        # Step 5: Retreat using Cartesian path
+        self.get_logger().info(f"Step 5: Retreating ({retreat_distance}m)...")
         if not self.move_relative_cartesian(delta_z=retreat_distance):
             # Fallback
             current_pose = self.get_current_pose()
