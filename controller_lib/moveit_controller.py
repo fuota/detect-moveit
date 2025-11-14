@@ -615,6 +615,7 @@ class MoveItController(Node):
         planning_scene = PlanningScene()
         planning_scene.robot_state.attached_collision_objects.append(attached_object)
         planning_scene.is_diff = True
+        planning_scene.robot_state.is_diff = True
         
         self.planning_scene_pub.publish(planning_scene)
         time.sleep(0.3)
@@ -623,24 +624,37 @@ class MoveItController(Node):
         return True
     
     def detach_object_from_gripper(self, object_name):
-        """Detach object from gripper"""
+        """Detach object from gripper - FIXED VERSION"""
         self.get_logger().info(f"Detaching '{object_name}' from gripper...")
         
+        # Create attached collision object message
         attached_object = AttachedCollisionObject()
         attached_object.link_name = self.end_effector_frame
-        attached_object.object.id = object_name
-        attached_object.object.operation = CollisionObject.REMOVE
         
+        # The object to detach
+        collision_object = CollisionObject()
+        collision_object.id = object_name
+        collision_object.operation = CollisionObject.REMOVE
+        
+        attached_object.object = collision_object
+        
+        # Create planning scene diff
         planning_scene = PlanningScene()
-        planning_scene.robot_state.attached_collision_objects.append(attached_object)
         planning_scene.is_diff = True
+        planning_scene.robot_state.is_diff = True  # ← THIS WAS MISSING!
+        planning_scene.robot_state.attached_collision_objects.append(attached_object)
         
-        self.planning_scene_pub.publish(planning_scene)
-        time.sleep(0.5)
+        # Publish multiple times to ensure receipt
+        self.get_logger().info(f"Publishing detach for '{object_name}'...")
+        for i in range(5):
+            self.planning_scene_pub.publish(planning_scene)
+            self.get_logger().info(f"  Published detach message {i+1}/5")
+            time.sleep(0.2)
         
-        self.get_logger().info(f"✓ Detached '{object_name}'")
+        self.get_logger().info(f"✓ Sent detach request for '{object_name}'")
+        time.sleep(1.0)
+        
         return True
-    
     # ==================== HIGH-LEVEL OPERATIONS ====================
     
     def pick_object(self, object_name, grasp_pose, approach_direction="side", 
@@ -680,12 +694,15 @@ class MoveItController(Node):
         time.sleep(1.0)
         
         # Step 3: Attach object for collision avoidance
-        self.get_logger().info("Step 3: Attaching object for collision avoidance...")
+        self.get_logger().info("Step 3a: Attaching object to gripper...")
         if not self.attach_object_to_gripper(object_name):
             self.get_logger().error("Failed to attach object")
             return False
         time.sleep(0.3)
         
+        self.get_logger().info("Step 3b: Removing object from world...")
+        self.remove_collision_object(object_name)
+        time.sleep(0.3)
         # Step 4: Move closer using CARTESIAN PATH
         delta_z = 0.03
         self.get_logger().info(f"Step 4: Approaching object using Cartesian path ({grasp_distance}m, {delta_z}m)...")
@@ -741,7 +758,7 @@ class MoveItController(Node):
         self.get_logger().info("✓ Pick operation completed successfully")
         return True
     
-    def place_object(self, object_name, place_pose, retreat_distance=0.08):
+    def place_object(self, object_name, place_pose, retreat_distance=0.4):
         """
         Execute complete place operation
         
@@ -778,24 +795,24 @@ class MoveItController(Node):
         time.sleep(1.0)
         
         #Step 3: Lower object slightly to ensure release
-        self.get_logger().info("Step 3: Lowering object slightly to ensure release...")
-        if self.cartesian_available and not self.move_relative_cartesian(delta_z= -retreat_distance):
-            self.get_logger().warn("Cartesian lower failed, using standard planning")
-            current_pose = self.get_current_pose()
-            if current_pose:
-                current_pose.position.z -= retreat_distance
-                if not self.move_to_pose(current_pose):
-                    return False
-            else:
-                return False
-        elif not self.cartesian_available:
-            current_pose = self.get_current_pose()
-            if current_pose:
-                current_pose.position.z -= retreat_distance
-                if not self.move_to_pose(current_pose):
-                    return False
-            else:
-                return False
+        # self.get_logger().info("Step 3: Lowering object slightly to ensure release...")
+        # if self.cartesian_available and not self.move_relative_cartesian(delta_z= -retreat_distance):
+        #     self.get_logger().warn("Cartesian lower failed, using standard planning")
+        #     current_pose = self.get_current_pose()
+        #     if current_pose:
+        #         current_pose.position.z -= retreat_distance
+        #         if not self.move_to_pose(current_pose):
+        #             return False
+        #     else:
+        #         return False
+        # elif not self.cartesian_available:
+        #     current_pose = self.get_current_pose()
+        #     if current_pose:
+        #         current_pose.position.z -= retreat_distance
+        #         if not self.move_to_pose(current_pose):
+        #             return False
+        #     else:
+        #         return False
         # Step 4: Detach object
         self.get_logger().info("Step 4: Detaching object from gripper...")
         self.detach_object_from_gripper(object_name)

@@ -14,10 +14,10 @@ import json
 from moveit_controller import MoveItController
 
 
-# Object name mapping
+# Object name mapping: marker_id -> (name, height, radius)
 OBJECT_MAP = {
-    6: "water_bottle",
-    7: "medicine_bottle"
+    6: ("water_bottle", 0.18, 0.03),
+    7: ("medicine_bottle", 0.14, 0.025)
 }
 
 
@@ -29,7 +29,23 @@ class RealDetectionPickPlaceController(MoveItController):
     
     def __init__(self):
         super().__init__(node_name='real_detection_pick_place_controller')
-        
+
+        # Workspace table parameters
+        self.workspace_table = {
+            'dx': 0.38,
+            'dy': -0.28,
+            'dz': -0.37,
+            'width': 0.55,
+            'depth': 0.55,
+            'height': 0.66
+        }
+
+        self.serving_area = [(self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.38, self.workspace_table['dz']+self.workspace_table['height']),
+                             (self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.28, self.workspace_table['dz']+self.workspace_table['height']),
+                             (self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.18, self.workspace_table['dz']+self.workspace_table['height']),
+                             (self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.08, self.workspace_table['dz']+self.workspace_table['height']),
+                            ]  # X,Y ranges for placing objects
+
         # Detected objects storage
         self.detected_objects = {}  # {marker_id: {'pose': Pose, 'name': str}}
         self.marker_ids = []
@@ -70,15 +86,14 @@ class RealDetectionPickPlaceController(MoveItController):
         if len(msg.poses) != len(self.marker_ids):
             return
         
-        # Update poses ONLY for currently visible objects
+        # Update poses ONLY for currently visible objects that aren't picked
         for i, marker_id in enumerate(self.marker_ids):
             if marker_id in self.detected_objects:
                 self.detected_objects[marker_id]['pose'] = msg.poses[i]
-                # CHANGE THIS LINE - don't update collision if picked:
+                # Only update collision if object is NOT picked and NOT moving
                 if marker_id not in self.picked_objects:
                     self.update_collision_cylinder(marker_id, msg.poses[i])
         
-        # Mark that we have received valid poses
         if len(msg.poses) > 0:
             self.pose_received = True
             self.valid_pose_available = True
@@ -105,7 +120,9 @@ class RealDetectionPickPlaceController(MoveItController):
             if marker_id not in self.detected_objects:
                 self.detected_objects[marker_id] = {
                     'pose': None,
-                    'name': OBJECT_MAP.get(marker_id, f'marker_{marker_id}')
+                    'name': OBJECT_MAP.get(marker_id, f'marker_{marker_id}')[0],
+                    'height': OBJECT_MAP.get(marker_id, f'marker_{marker_id}')[1],
+                    'radius': OBJECT_MAP.get(marker_id, f'marker_{marker_id}')[2]
                 }
     
     def names_callback(self, msg: String):
@@ -123,13 +140,15 @@ class RealDetectionPickPlaceController(MoveItController):
     
     # ==================== COLLISION OBJECT MANAGEMENT ====================
     
-    def update_collision_cylinder(self, marker_id, pose, radius=0.03):
+    def update_collision_cylinder(self, marker_id, pose: Pose):
         """Create or update collision cylinder for detected object"""
         object_name = f"detected_object_{marker_id}"
         
         # Calculate height from table (z=0.09 is reference)
-        height = (pose.position.z - 0.29) * 2
-        
+        height = (pose.position.z - (self.workspace_table['dz'] + self.workspace_table['height'])) * 2
+        radius = OBJECT_MAP.get(marker_id, (None, None, 0.03))[2]
+
+
         # Add/update cylinder using parent class method
         self.add_cylinder_collision_object(
             object_name,
@@ -186,14 +205,13 @@ class RealDetectionPickPlaceController(MoveItController):
         print("="*60)
     
     # ==================== PICK EXECUTION ====================
-    def execute_pick_and_place_sequence(self, marker_id, place_offset_x=0.0, place_offset_y = 0.2, place_offset_z=0.0):
+    def execute_pick_and_place_sequence(self, marker_id, place_pose):
         """
         Execute complete pick and place sequence for selected object
         
         Args:
             marker_id: ArUco marker ID to pick
-            place_offset_y: Y-axis offset for place location (default: 0.2m)
-        
+            place_pose: Pose to place the object at
         Returns:
             bool: True if both pick and place succeed
         """
@@ -226,7 +244,7 @@ class RealDetectionPickPlaceController(MoveItController):
             return False
         
         self.picked_objects.add(marker_id)
-        self.remove_detected_object_collision(marker_id)
+        # self.remove_detected_object_collision(marker_id)
         
         self.get_logger().info("✓ Pick operation completed successfully!")
         print("\n✓ Object picked successfully!")
@@ -247,11 +265,7 @@ class RealDetectionPickPlaceController(MoveItController):
             f"y={current_pose.position.y:.3f}, z={current_pose.position.z:.3f}")
         
         # Calculate place pose (offset in Y direction)
-        place_pose = Pose()
-        place_pose.position.x = current_pose.position.x + place_offset_x
-        place_pose.position.y = current_pose.position.y + place_offset_y
-        place_pose.position.z = current_pose.position.z + place_offset_z
-        place_pose.orientation = current_pose.orientation
+       
         
         self.get_logger().info(
             f"Target place pose: x={place_pose.position.x:.3f}, "
@@ -260,22 +274,27 @@ class RealDetectionPickPlaceController(MoveItController):
         # Execute place
         place_success = self.place_object(object_name, place_pose)
         if place_success:
-            # Update the stored pose to the new location
-            self.detected_objects[marker_id]['pose'] = place_pose
-            self.picked_objects.discard(marker_id)  # No longer in gripper
-            self.update_collision_cylinder(marker_id, place_pose)  # Immediately add collision at placed location
-
+            self.get_logger().info("✓ Place operation completed successfully!")
+            if self.get_current_pose():
+                object_pose = self.get_current_pose()
+                object_pose.position.x += 0.2
+                object_pose.position.z = place_pose.position.z
+                self.detected_objects[marker_id]['pose'] = object_pose
+                self.get_logger().info(f"Add collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
+                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+            else:
+                self.get_logger().warn(f"Failed to get current pose for object {marker_id}")
+                object_pose = place_pose
+                object_pose.position.x += 0.2
+                self.detected_objects[marker_id]['pose'] = object_pose
+                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.get_logger().info(f"Added collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
+        else:
+            self.get_logger().error("✗ Place operation failed!")
         
         # CRITICAL: Release movement flag to allow updates again
         self.is_moving = False
         self.get_logger().info("🔓 Movement completed - resuming pose updates")
-        
-        if place_success:
-            self.get_logger().info("\n🎉 Place successful! Pick and place operation completed.")
-            print("\n🎉 Pick and place completed successfully!")
-        else:
-            self.get_logger().error("✗ Place operation failed!")
-            print("\n✗ Place failed!")
         
         return place_success
     
@@ -349,7 +368,7 @@ class RealDetectionPickPlaceController(MoveItController):
         chair_seat_width = 0.6
         chair_seat_y = -0.1
         chair_seat_z = 0
-        chair_seat_height = 1.8
+        chair_seat_height = 2.0
         self.add_box_collision_object(
             "wheel_chair_seat", 
             x=chair_seat_x, y=chair_seat_y, z=chair_seat_z, 
@@ -369,15 +388,56 @@ class RealDetectionPickPlaceController(MoveItController):
         
         # Big table
         self.add_real_object("big_table",dx=0.18, dy=-0.49, dz=-0.37, width=0.765, depth=-1, height=0.715)
-        
-        # Small table
-        self.add_real_object("small_table", dx=0.38, dy=-0.28, dz=-0.37, width=0.55, depth=0.55, height=0.66)
+
+        # Workspace table
+        self.add_real_object("workspace_table", dx=self.workspace_table['dx'], dy=self.workspace_table['dy'], dz=self.workspace_table['dz'], width=self.workspace_table['width'], depth=self.workspace_table['depth'], height=self.workspace_table['height'])
     
         
         # Wall
         self.add_real_object("wall", dx=1, dy=-7.0, dz=-0.37, width=0.3, depth=15, height=4.0)
         
         self.get_logger().info("✓ Static environment added")
+
+
+    def convert_serving_area_to_pose(self, area_tuple):
+        """Convert serving area tuple to Pose message"""
+        pose_msg = Pose()
+        pose_msg.position.x = area_tuple[0]
+        pose_msg.position.y = area_tuple[1]
+        pose_msg.position.z = area_tuple[2]
+        pose_msg.orientation.w = 1.0  # Neutral orientation
+        return pose_msg
+
+    def prepare_medicine(self):
+        """Prepare medicine by picking and placing the medicine bottle"""
+        #============PICK AND PLACE WATER BOTTLE=================
+        if 6 not in self.detected_objects:
+            self.get_logger().error("Water bottle (marker 6) not detected!")
+            return False
+        
+        self.get_logger().info("Preparing to pick water bottle...")
+        water_place_pose = self.convert_serving_area_to_pose(self.serving_area[0])
+        water_place_pose.position.z += self.detected_objects[6]['height'] / 2  # Adjust for object height
+        if not self.execute_pick_and_place_sequence(6, place_pose=water_place_pose):  # Pick and place water bottle
+            self.get_logger().error("Failed to prepare medicine - water bottle pick and place failed")
+            return False
+        
+        self.get_logger().info("Water bottle placed successfully, preparing to pick medicine bottle...")
+        time.sleep(1)  # Wait a moment before next operation
+
+        #============PICK AND PLACE MEDICINE BOTTLE=================
+        if 7 not in self.detected_objects:
+            self.get_logger().error("Medicine bottle (marker 7) not detected!")
+            return False
+
+        self.get_logger().info("Preparing to pick medicine bottle...")
+        medicine_place_pose = self.convert_serving_area_to_pose(self.serving_area[3])
+        medicine_place_pose.position.z += self.detected_objects[7]['height'] / 2  # Adjust for object height
+        if not self.execute_pick_and_place_sequence(7, place_pose=medicine_place_pose):  # Pick and place medicine bottle
+            self.get_logger().error("Failed to prepare medicine - medicine bottle pick and place failed")
+            return False
+        self.get_logger().info("Medicine bottle placed successfully, medicine preparation completed!")
+        return True
 
 
 def main(args=None):
@@ -392,8 +452,7 @@ def main(args=None):
     if controller.wait_for_valid_pose(timeout=15.0):
         controller.display_detected_objects()
         
-        # Execute pick for marker ID 6
-        controller.execute_pick_and_place_sequence(6)
+        controller.prepare_medicine()        
     else:
         controller.get_logger().error("Failed to receive valid pose - aborting")
     

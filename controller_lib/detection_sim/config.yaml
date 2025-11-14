@@ -14,9 +14,19 @@ marker_size: 0.025
 simulated_objects:
   - id: 6  # water_bottle
     pose:
-      x: 0.6
-      y: -0.5
-      z: 0.625
+      x: 0.8
+      y: -0.2
+      z: 0.38
+      qx: 0.0
+      qy: 0.0
+      qz: 0.0
+      qw: 1.0
+
+  - id: 7  # medicine_bottle
+    pose:
+      x: 0.75
+      y: -0.02
+      z: 0.36
       qx: 0.0
       qy: 0.0
       qz: 0.0
