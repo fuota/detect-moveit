@@ -19,10 +19,14 @@ from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.msg import JointConstraint, Constraints, PositionConstraint, OrientationConstraint
+from geometry_msgs.msg import Twist
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import time
 import math
 import tf2_ros
 
+
+        
 
 def euler_to_quaternion(roll, pitch, yaw):
     """Convert Euler angles (radians) to quaternion (x, y, z, w)"""
@@ -70,7 +74,10 @@ class MoveItController(Node):
         self.gripper_open_position = 0.0
         self.gripper_max_close_left = math.radians(46)
         self.gripper_max_close_right = math.radians(-46)
-        
+
+        self.GRIPPER_OUTER_LENGTH = 0.155
+        self.GRIPPER_INNER_LENGTH = 0.088
+
         # Grasp orientations
         self.grasp_orientations = {
             'side': euler_to_quaternion(0.5*math.pi, 0, 0.5*math.pi)
@@ -243,7 +250,7 @@ class MoveItController(Node):
                 continue
 
             result_future = goal_handle.get_result_async()
-            rclpy.spin_until_future_complete(self, result_future, timeout_sec=planning_time + 30.0)
+            rclpy.spin_until_future_complete(self, result_future, timeout_sec=planning_time + 60.0)
             if not result_future.done():
                 self.get_logger().warn("Move result timeout; retrying...")
                 continue
@@ -404,12 +411,15 @@ class MoveItController(Node):
         
         return success
     
-    def move_relative_cartesian(self, delta_x=0.0, delta_y=0.0, delta_z=0.0):
+    def move_relative_cartesian(self, delta_x=0.0, delta_y=0.0, delta_z=0.0, 
+                            eef_step=0.01, jump_threshold=2.0):  # Increased from 0.005 and 0.0
         """
         Move relative to current pose using Cartesian path
         
         Args:
             delta_x/y/z: Position changes in meters
+            eef_step: Step size for Cartesian interpolation (larger = fewer checks)
+            jump_threshold: Allow larger joint jumps (0.0 = very strict)
         
         Returns:
             bool: True if successful
@@ -418,18 +428,22 @@ class MoveItController(Node):
         if current_pose is None:
             return False
         
-        # Create target pose
         target_pose = Pose()
         target_pose.position.x = current_pose.position.x + delta_x
         target_pose.position.y = current_pose.position.y + delta_y
         target_pose.position.z = current_pose.position.z + delta_z
-        target_pose.orientation = current_pose.orientation  # Keep orientation
+        target_pose.orientation = current_pose.orientation
         
+        distance = (delta_x**2 + delta_y**2 + delta_z**2)**0.5
         self.get_logger().info(
-            f"Cartesian move: Δ({delta_x:.3f}, {delta_y:.3f}, {delta_z:.3f})")
+            f"Cartesian move: Δ({delta_x:.3f}, {delta_y:.3f}, {delta_z:.3f}) = {distance:.3f}m")
         
-        # Execute Cartesian path with single waypoint
-        return self.move_cartesian([target_pose], eef_step=0.005)
+        # Use larger step size for long distances
+        adaptive_step = min(0.02, distance / 20)  # At least 20 waypoints
+        
+        return self.move_cartesian([target_pose], 
+                                eef_step=adaptive_step, 
+                                jump_threshold=jump_threshold)
     
     # ==================== GRIPPER CONTROL ====================
     
@@ -658,8 +672,8 @@ class MoveItController(Node):
     # ==================== HIGH-LEVEL OPERATIONS ====================
     
     def pick_object(self, object_name, grasp_pose, approach_direction="side", 
-                    approach_distance=0.20, grasp_distance=0.05, 
-                    lift_distance=0.10, grip_force=0.6):
+                    approach_distance=0.02, grasp_distance=0.015, 
+                    lift_distance=0.2, grip_force=0.6):
         """
         Execute complete pick operation with Cartesian paths
         
@@ -676,6 +690,7 @@ class MoveItController(Node):
             bool: True if successful
         """
         self.get_logger().info(f"Starting pick operation for '{object_name}'")
+        approach_distance += self.GRIPPER_OUTER_LENGTH
         
         # Step 1: Move to approach pose
         approach_pose = self.compute_approach_pose(
@@ -692,6 +707,37 @@ class MoveItController(Node):
             self.get_logger().error("Failed to open gripper")
             return False
         time.sleep(1.0)
+
+        # Step 4: Move closer using CARTESIAN PATH
+        
+        # self.get_logger().info(f"Approach distance: {approach_distance}m, Grasp distance: {grasp_distance}m, Inner length: {self.GRIPPER_INNER_LENGTH}m -> Delta X: {approach_distance - (self.GRIPPER_INNER_LENGTH + grasp_distance)}m")
+        delta_x = approach_distance - (self.GRIPPER_INNER_LENGTH + grasp_distance)
+        delta_z = 0.0
+        # DEBUG:
+        current_pose = self.get_current_pose()
+        self.get_logger().info(f"Step 4: Approaching object using Cartesian path (delta_x: {delta_x:.3f}m, delta_z: {delta_z:.3f}m)...")
+        self.get_logger().info(f"Current pose of gripper: {current_pose.position.x + self.GRIPPER_INNER_LENGTH:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z:.3f}")
+        self.get_logger().info(f"Grasp pose of gripper: {current_pose.position.x + delta_x + self.GRIPPER_INNER_LENGTH:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z + delta_z:.3f}")
+        if self.cartesian_available and not self.move_relative_cartesian(delta_x=delta_x, delta_z=delta_z):
+            self.get_logger().warn("Cartesian approach failed, using standard planning")
+            # Fallback
+            current_pose = self.get_current_pose()
+            if current_pose:
+                current_pose.position.x += delta_x
+                if not self.move_to_pose(current_pose):
+                    return False
+            else:
+                return False
+        elif not self.cartesian_available:
+            # Use standard planning
+            current_pose = self.get_current_pose()
+            if current_pose:
+                current_pose.position.x += delta_x
+                if not self.move_to_pose(current_pose):
+                    return False
+            else:
+                return False
+        
         
         # Step 3: Attach object for collision avoidance
         self.get_logger().info("Step 3a: Attaching object to gripper...")
@@ -703,29 +749,7 @@ class MoveItController(Node):
         self.get_logger().info("Step 3b: Removing object from world...")
         self.remove_collision_object(object_name)
         time.sleep(0.3)
-        # Step 4: Move closer using CARTESIAN PATH
-        delta_z = 0.03
-        self.get_logger().info(f"Step 4: Approaching object using Cartesian path ({grasp_distance}m, {delta_z}m)...")
-        if self.cartesian_available and not self.move_relative_cartesian(delta_x=grasp_distance, delta_z=delta_z):
-            self.get_logger().warn("Cartesian approach failed, using standard planning")
-            # Fallback
-            current_pose = self.get_current_pose()
-            if current_pose:
-                current_pose.position.x += grasp_distance
-                if not self.move_to_pose(current_pose):
-                    return False
-            else:
-                return False
-        elif not self.cartesian_available:
-            # Use standard planning
-            current_pose = self.get_current_pose()
-            if current_pose:
-                current_pose.position.x += grasp_distance
-                if not self.move_to_pose(current_pose):
-                    return False
-            else:
-                return False
-        
+
         # Step 5: Close gripper
         self.get_logger().info("Step 5: Closing gripper...")
         if not self.close_gripper(grip_force):
@@ -758,7 +782,7 @@ class MoveItController(Node):
         self.get_logger().info("✓ Pick operation completed successfully")
         return True
     
-    def place_object(self, object_name, place_pose, retreat_distance=0.4):
+    def place_object(self, object_name, place_pose, retreat_distance=0.2):
         """
         Execute complete place operation
         
@@ -774,7 +798,6 @@ class MoveItController(Node):
         
         # Step 1: Move to place pose
         self.get_logger().info("Step 1: Moving to place pose...")
-        #  self.get_logger().info(f"Step 6: Lifting object using Cartesian path ({lift_distance}m)...")
         current_pose = self.get_current_pose()
         dx = place_pose.position.x - current_pose.position.x
         dy = place_pose.position.y - current_pose.position.y
@@ -789,6 +812,12 @@ class MoveItController(Node):
             
         # Step 2: Open gripper
         self.get_logger().info("Step 2: Opening gripper to release object...")
+        #DEBUG: 
+        if self.get_current_pose():
+            current_pose = self.get_current_pose()
+            self.get_logger().info(f"Current pose of gripper: {current_pose.position.x+self.GRIPPER_INNER_LENGTH:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z:.3f}")
+        else:
+            self.get_logger().info("Failed to get current pose for debug")
         if not self.open_gripper():
             self.get_logger().error("Failed to open gripper")
             return False
@@ -829,3 +858,69 @@ class MoveItController(Node):
         
         self.get_logger().info("✓ Place operation completed successfully")
         return True
+
+    def place_object_with_start(self, object_name, start_pose, place_pose, retreat_distance=0.2):
+        """
+        Execute complete place operation
+        
+        Args:
+            object_name: Name of object to place
+            start_pose: Starting pose of object before placing
+            place_pose: Target place pose
+            retreat_distance: Distance to retreat after placing (m)
+        
+        Returns:
+            bool: True if successful
+        """
+        self.get_logger().info(f"Starting place operation for '{object_name}'")
+        
+        # Step 1: Move to place pose
+        self.get_logger().info("Step 1: Moving to place pose...")
+        dx = place_pose.position.x - start_pose.position.x
+        dy = place_pose.position.y - start_pose.position.y
+        dz = place_pose.position.z - start_pose.position.z
+            
+        if self.cartesian_available and self.move_relative_cartesian(delta_x=dx, delta_y=dy, delta_z=dz):
+            self.get_logger().info("Moved to place pose using Cartesian path")
+        else:
+            self.get_logger().warn("Cartesian movement failed, using standard planning")
+            current_pose = self.get_current_pose()
+            if current_pose:
+                current_pose.position.x += dx
+                current_pose.position.y += dy
+                current_pose.position.z += dz
+            if not self.move_to_pose(current_pose):
+                return False
+            
+        # Step 2: Open gripper
+        self.get_logger().info("Step 2: Opening gripper to release object...")
+        #DEBUG: 
+        if self.get_current_pose():
+            current_pose = self.get_current_pose()
+            self.get_logger().info(f"Current pose of gripper: {current_pose.position.x+self.GRIPPER_INNER_LENGTH:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z:.3f}")
+        else:
+            self.get_logger().info("Failed to get current pose for debug")
+        if not self.open_gripper():
+            self.get_logger().error("Failed to open gripper")
+            return False
+        time.sleep(1.0)
+
+      
+        # Step 4: Retreat using Cartesian path
+        self.get_logger().info(f"Step 4: Retreating ({retreat_distance}m)...")
+        if not self.move_relative_cartesian(delta_z=retreat_distance):
+            # Fallback
+            current_pose = self.get_current_pose()
+            if current_pose:
+                current_pose.position.z += retreat_distance
+                if not self.move_to_pose(current_pose):
+                    return False
+                
+          # Step 3: Detach object
+        self.get_logger().info("Step 3: Detaching object from gripper...")
+        self.detach_object_from_gripper(object_name)
+
+        
+        self.get_logger().info("✓ Place operation completed successfully")
+        return True
+

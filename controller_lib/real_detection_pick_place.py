@@ -8,6 +8,9 @@ import rclpy
 from geometry_msgs.msg import Pose, PoseArray
 from std_msgs.msg import Int32MultiArray, String
 from moveit_msgs.msg import CollisionObject
+from std_srvs.srv import Trigger
+from rclpy.callback_groups import ReentrantCallbackGroup
+
 import time
 import math
 import json
@@ -40,10 +43,10 @@ class RealDetectionPickPlaceController(MoveItController):
             'height': 0.66
         }
 
-        self.serving_area = [(self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.38, self.workspace_table['dz']+self.workspace_table['height']),
-                             (self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.28, self.workspace_table['dz']+self.workspace_table['height']),
-                             (self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.18, self.workspace_table['dz']+self.workspace_table['height']),
-                             (self.workspace_table['dx']-0.07, self.workspace_table['dy']+0.08, self.workspace_table['dz']+self.workspace_table['height']),
+        self.serving_area = [(self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475, self.workspace_table['dz']+self.workspace_table['height']),
+                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475-0.1375, self.workspace_table['dz']+self.workspace_table['height']),
+                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475-0.1375*2, self.workspace_table['dz']+self.workspace_table['height']),
+                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475-0.1375*3, self.workspace_table['dz']+self.workspace_table['height']),
                             ]  # X,Y ranges for placing objects
 
         # Detected objects storage
@@ -55,6 +58,9 @@ class RealDetectionPickPlaceController(MoveItController):
         self.is_moving = False
         self.pose_received = False
         self.valid_pose_available = False
+
+        # Create callback group for service
+        self.callback_group = ReentrantCallbackGroup()
         
         # Subscribe to ArUco detection topics
         self.pose_sub = self.create_subscription(
@@ -72,10 +78,34 @@ class RealDetectionPickPlaceController(MoveItController):
             '/detected_objects/names',
             self.names_callback,
             10)
+        # Create service for medicine preparation
+        self.prepare_medicine_service = self.create_service(
+            Trigger,
+            'prepare_medicine',
+            self.prepare_medicine_service_callback,
+            callback_group=self.callback_group
+        )
+        
+        self.get_logger().info("Medicine preparation service available at /prepare_medicine")
         
         self.get_logger().info("=== Real Detection Pick & Place Controller Started ===")
         self.get_logger().info("Waiting for ArUco detections...")
     
+    # ==================== SERVICE CALLBACKS ====================
+
+    def prepare_medicine_service_callback(self, request, response):
+        """Service callback to trigger medicine preparation"""
+        self.get_logger().info("Received medicine preparation request from frontend")
+        
+        success = self.prepare_medicine()
+        
+        response.success = success
+        if success:
+            response.message = "Medicine preparation completed successfully"
+        else:
+            response.message = "Medicine preparation failed"
+        
+        return response 
     # ==================== ARUCO DETECTION CALLBACKS ====================
     
     def pose_callback(self, msg: PoseArray):
@@ -147,12 +177,13 @@ class RealDetectionPickPlaceController(MoveItController):
         # Calculate height from table (z=0.09 is reference)
         height = (pose.position.z - (self.workspace_table['dz'] + self.workspace_table['height'])) * 2
         radius = OBJECT_MAP.get(marker_id, (None, None, 0.03))[2]
+        center_x = pose.position.x + OBJECT_MAP.get(marker_id, (None, None, 0.0))[2]  # Offset by radius
 
 
         # Add/update cylinder using parent class method
         self.add_cylinder_collision_object(
             object_name,
-            x=pose.position.x,
+            x=center_x,
             y=pose.position.y,
             z=pose.position.z,
             radius=radius,
@@ -184,25 +215,25 @@ class RealDetectionPickPlaceController(MoveItController):
     
     def display_detected_objects(self):
         """Display currently detected objects"""
-        print("\n" + "="*60)
-        print("  DETECTED OBJECTS")
-        print("="*60)
+        self.get_logger().info("\n" + "="*60)
+        self.get_logger().info("  DETECTED OBJECTS")
+        self.get_logger().info("="*60)
         
         if len(self.detected_objects) == 0:
-            print("  No objects detected")
+            self.get_logger().info("  No objects detected")
         else:
             for marker_id, obj_data in self.detected_objects.items():
                 pose = obj_data.get('pose')
                 name = obj_data.get('name', f'marker_{marker_id}')
                 
                 if pose:
-                    print(f"  [{marker_id}] {name}")
-                    print(f"      Position: ({pose.position.x:.3f}, "
+                    self.get_logger().info(f"  [{marker_id}] {name}")
+                    self.get_logger().info(f"      Position: ({pose.position.x:.3f}, "
                           f"{pose.position.y:.3f}, {pose.position.z:.3f})")
                 else:
-                    print(f"  [{marker_id}] {name} (no pose data)")
+                    self.get_logger().info(f"  [{marker_id}] {name} (no pose data)")
         
-        print("="*60)
+        self.get_logger().info("="*60)
     
     # ==================== PICK EXECUTION ====================
     def execute_pick_and_place_sequence(self, marker_id, place_pose):
@@ -229,13 +260,15 @@ class RealDetectionPickPlaceController(MoveItController):
             self.is_moving = False
             return False
         
-        grasp_pose = obj_data['pose']
+        object_pose = obj_data['pose']
         object_name = f"detected_object_{marker_id}"
         
         # ==================== PICK PHASE ====================
+        # approach_distance = 0.0  # Meters from the gripper to the object before pick
+        grasp_distance = 0.02  # Meters from the gripper to the object after pick
         self.get_logger().info("\n--- PICK PHASE ---")
-        pick_success = self.pick_object(object_name, grasp_pose)
-        
+        pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance)
+ 
         if not pick_success:
             self.get_logger().error("✗ Pick operation failed!")
             print("\n✗ Pick failed!")
@@ -272,20 +305,20 @@ class RealDetectionPickPlaceController(MoveItController):
             f"y={place_pose.position.y:.3f}, z={place_pose.position.z:.3f}")
         
         # Execute place
-        place_success = self.place_object(object_name, place_pose)
+        place_success = self.place_object_with_start(object_name, object_pose, place_pose)
         if place_success:
             self.get_logger().info("✓ Place operation completed successfully!")
             if self.get_current_pose():
-                object_pose = self.get_current_pose()
-                object_pose.position.x += 0.2
+                object_pose = self.get_current_pose()                    
+                object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance
                 object_pose.position.z = place_pose.position.z
+                self.get_logger().info(f"Marker {marker_id} placed at: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
                 self.detected_objects[marker_id]['pose'] = object_pose
                 self.get_logger().info(f"Add collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
                 self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
             else:
                 self.get_logger().warn(f"Failed to get current pose for object {marker_id}")
                 object_pose = place_pose
-                object_pose.position.x += 0.2
                 self.detected_objects[marker_id]['pose'] = object_pose
                 self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
                 self.get_logger().info(f"Added collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
@@ -323,11 +356,11 @@ class RealDetectionPickPlaceController(MoveItController):
             self.is_moving = False
             return False
         
-        grasp_pose = obj_data['pose']
+        object_pose = obj_data['pose']
         object_name = f"detected_object_{marker_id}"
         
         # Execute pick using parent class method
-        success = self.pick_object(object_name, grasp_pose)
+        success = self.pick_object(object_name, object_pose)
         if success:
             self.picked_objects.add(marker_id)
             self.remove_detected_object_collision(marker_id)
