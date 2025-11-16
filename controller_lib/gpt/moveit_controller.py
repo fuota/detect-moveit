@@ -304,284 +304,6 @@ class MoveItController(Node):
         self.get_logger().error("All planning retries exhausted.")
         return False
     
-    # ==================== PILZ LIN PLANNER (STRAIGHT LINE) ====================
-    
-
-    def move_linear_pilz(self, target_pose, velocity_scaling=0.1, acceleration_scaling=0.1):
-        """
-        Use Pilz LIN planner for straight-line Cartesian motion
-        
-        Args:
-            target_pose: Target pose
-            velocity_scaling: Velocity scaling (0.0-1.0)
-            acceleration_scaling: Acceleration scaling (0.0-1.0)
-        
-        Returns:
-            bool: True if successful
-        """
-        self.get_logger().info("Planning linear motion with Pilz LIN planner...")
-        
-        # Create motion plan request
-        request = GetMotionPlan.Request()
-        
-        # Configure request
-        request.motion_plan_request.workspace_parameters.header.frame_id = self.base_frame
-        request.motion_plan_request.workspace_parameters.header.stamp = self.get_clock().now().to_msg()
-        
-        request.motion_plan_request.group_name = self.arm_group_name
-        request.motion_plan_request.num_planning_attempts = 10
-        request.motion_plan_request.allowed_planning_time = 5.0
-        request.motion_plan_request.max_velocity_scaling_factor = velocity_scaling
-        request.motion_plan_request.max_acceleration_scaling_factor = acceleration_scaling
-        
-        # CRITICAL: Specify Pilz planner
-        request.motion_plan_request.planner_id = "LIN"  # Linear motion
-        request.motion_plan_request.pipeline_id = "pilz_industrial_motion_planner"
-        
-        # Set goal constraint
-        constraints = Constraints()
-        
-        # Position constraint
-        pos_constraint = PositionConstraint()
-        pos_constraint.header.frame_id = self.base_frame
-        pos_constraint.link_name = self.end_effector_frame
-        pos_constraint.constraint_region.primitive_poses.append(target_pose)
-        
-        pos_prim = SolidPrimitive()
-        pos_prim.type = SolidPrimitive.BOX
-        pos_prim.dimensions = [0.001, 0.001, 0.001]  # Tight tolerance for Pilz
-        pos_constraint.constraint_region.primitives.append(pos_prim)
-        pos_constraint.weight = 1.0
-        constraints.position_constraints.append(pos_constraint)
-        
-        # Orientation constraint
-        orient_constraint = OrientationConstraint()
-        orient_constraint.header.frame_id = self.base_frame
-        orient_constraint.link_name = self.end_effector_frame
-        orient_constraint.orientation = target_pose.orientation
-        orient_constraint.absolute_x_axis_tolerance = 0.001
-        orient_constraint.absolute_y_axis_tolerance = 0.001
-        orient_constraint.absolute_z_axis_tolerance = 0.001
-        orient_constraint.weight = 1.0
-        constraints.orientation_constraints.append(orient_constraint)
-        
-        request.motion_plan_request.goal_constraints.append(constraints)
-        
-        # Call planning service
-        if not self.pilz_planning_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().error("Pilz planning service not available!")
-            return False
-        
-        future = self.pilz_planning_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        
-        if not future.done():
-            self.get_logger().error("Pilz planning timeout")
-            return False
-        
-        response = future.result()
-        
-        if response.motion_plan_response.error_code.val != MoveItErrorCodes.SUCCESS:
-            error_str = self._error_to_string(response.motion_plan_response.error_code.val)
-            self.get_logger().error(f"Pilz planning failed: {error_str}")
-            return False
-        
-        self.get_logger().info("✓ Pilz LIN plan computed, executing...")
-        
-        # Execute the trajectory
-        return self.execute_trajectory(
-            response.motion_plan_response.trajectory,
-            max_velocity_scaling=velocity_scaling
-        )
-    
-    def retreat_linear_pilz(self, distance=0.4, velocity_scaling=0.15):
-        """
-        Retreat using Pilz LIN planner - guaranteed straight line!
-        
-        Args:
-            distance: Distance to retreat (m)
-            velocity_scaling: Speed (0.0-1.0)
-        
-        Returns:
-            bool: True if successful
-        """
-        self.get_logger().info(f"🎯 Pilz LIN retreat: {distance}m at {velocity_scaling*100:.0f}% speed")
-        
-        current_pose = self.get_current_pose()
-        if not current_pose:
-            return False
-        
-        # Create target pose (straight up)
-        target_pose = Pose()
-        target_pose.position.x = current_pose.position.x
-        target_pose.position.y = current_pose.position.y
-        target_pose.position.z = current_pose.position.z + distance
-        target_pose.orientation = current_pose.orientation
-        
-        self.get_logger().info(
-            f"Moving from Z={current_pose.position.z:.3f}m to Z={target_pose.position.z:.3f}m"
-        )
-        
-        # Use Pilz LIN planner
-        success = self.move_linear_pilz(
-            target_pose,
-            velocity_scaling=velocity_scaling,
-            acceleration_scaling=velocity_scaling
-        )
-        
-        if success:
-            final_pose = self.get_current_pose()
-            if final_pose:
-                error = abs(final_pose.position.z - target_pose.position.z)
-                self.get_logger().info(
-                    f"✓ Pilz retreat complete: Z={final_pose.position.z:.3f}m, "
-                    f"error={error*1000:.1f}mm"
-                )
-        
-        return success
-    
-    def retreat_smooth(self, distance=0.4, segment_size=0.06):
-        """
-        Smooth retreat using multiple small Cartesian segments
-        Each segment is small enough that Cartesian planning succeeds
-        
-        Args:
-            distance: Total distance to retreat (m)
-            segment_size: Size of each segment (m) - smaller = more guaranteed success
-        
-        Returns:
-            bool: True if successful
-        """
-        current_pose = self.get_current_pose()
-        if not current_pose:
-            return False
-        
-        # Calculate number of segments
-        num_segments = max(1, int(distance / segment_size))
-        actual_segment = distance / num_segments
-        
-        self.get_logger().info(
-            f"Smooth retreat: {distance}m in {num_segments} segments of {actual_segment:.3f}m"
-        )
-        
-        start_z = current_pose.position.z
-        
-        for i in range(1, num_segments + 1):
-            # Calculate target for this segment
-            target_z = start_z + (actual_segment * i)
-            
-            # Create waypoint
-            waypoint = Pose()
-            waypoint.position.x = current_pose.position.x
-            waypoint.position.y = current_pose.position.y
-            waypoint.position.z = target_z
-            waypoint.orientation = current_pose.orientation
-            
-            # Try Cartesian first (should succeed with small segments)
-            success = self.move_cartesian(
-                waypoints=[waypoint],
-                eef_step=0.01,  # 1cm steps
-                jump_threshold=1.5,  # Allow some flexibility
-                max_velocity_scaling=0.2
-            )
-            
-            if not success:
-                self.get_logger().warn(
-                    f"Cartesian failed at segment {i}/{num_segments}, using standard planning"
-                )
-                # Fallback to standard planning
-                if not self.move_to_pose(waypoint, planning_time=2.0):
-                    self.get_logger().error(f"Failed at segment {i}/{num_segments}")
-                    return False
-            
-            # Brief pause for stability (optional)
-            if i < num_segments:
-                time.sleep(0.05)
-            
-            # Progress update
-            if i % 2 == 0 or i == num_segments:
-                current = self.get_current_pose()
-                if current:
-                    actual_z = current.position.z
-                    progress = (i / num_segments) * 100
-                    self.get_logger().info(
-                        f"  Progress: {i}/{num_segments} ({progress:.0f}%) - Z={actual_z:.3f}m"
-                    )
-        
-        # Verify final position
-        final_pose = self.get_current_pose()
-        if final_pose:
-            final_z = final_pose.position.z
-            target_z = start_z + distance
-            error = abs(final_z - target_z)
-            self.get_logger().info(
-                f"✓ Retreat complete: Z={final_z:.3f}m (error: {error*1000:.1f}mm)"
-            )
-            return error < 0.03  # Accept 3cm tolerance
-        
-        return True
-    
-    def move_to_pose_smooth(self, target_pose, segment_size=0.10):
-        """
-        Move to target pose using multi-segment Cartesian for smoother motion
-        
-        Args:
-            target_pose: Target pose
-            segment_size: Size of each segment (m)
-        
-        Returns:
-            bool: True if successful
-        """
-        current_pose = self.get_current_pose()
-        if not current_pose:
-            return False
-        
-        # Calculate deltas
-        dx = target_pose.position.x - current_pose.position.x
-        dy = target_pose.position.y - current_pose.position.y
-        dz = target_pose.position.z - current_pose.position.z
-        distance = (dx**2 + dy**2 + dz**2)**0.5
-        
-        # Calculate segments
-        num_segments = max(1, int(distance / segment_size))
-        
-        self.get_logger().info(
-            f"Moving to place pose: {distance:.3f}m in {num_segments} segments"
-        )
-        
-        start_x = current_pose.position.x
-        start_y = current_pose.position.y
-        start_z = current_pose.position.z
-        
-        for i in range(1, num_segments + 1):
-            # Calculate intermediate waypoint
-            progress = i / num_segments
-            waypoint = Pose()
-            waypoint.position.x = start_x + (dx * progress)
-            waypoint.position.y = start_y + (dy * progress)
-            waypoint.position.z = start_z + (dz * progress)
-            waypoint.orientation = target_pose.orientation  # Keep target orientation
-            
-            # Try Cartesian first
-            success = self.move_cartesian(
-                waypoints=[waypoint],
-                eef_step=0.01,
-                jump_threshold=2.0,
-                max_velocity_scaling=0.2
-            )
-            
-            if not success:
-                self.get_logger().warn(f"Cartesian failed at segment {i}, using standard planning")
-                if not self.move_to_pose(waypoint, planning_time=2.0):
-                    self.get_logger().error(f"Failed at segment {i}/{num_segments}")
-                    return False
-            
-            # Progress update
-            if i % 2 == 0 or i == num_segments:
-                self.get_logger().info(f"  Progress: {i}/{num_segments} ({(i/num_segments)*100:.0f}%)")
-        
-        return True
-    
     #=====================CHATGPT PILZ==============================
     def move_lin_relative(self, dx=0.0, dy=0.0, dz=0.0, planning_time=5.0):
         """
@@ -1003,72 +725,8 @@ class MoveItController(Node):
         self.get_logger().info(f"✓ Removed collision object '{name}'")
         return True
     
-    # ==================== OBJECT ATTACHMENT ====================
     
-    def attach_object_to_gripper(self, object_name):
-        """Attach object to gripper for collision checking"""
-        attached_object = AttachedCollisionObject()
-        attached_object.link_name = self.end_effector_frame
-        attached_object.object.id = object_name
-        attached_object.object.operation = CollisionObject.ADD
-        
-        attached_object.touch_links = [
-            self.end_effector_frame,
-            "robotiq_85_left_knuckle_link",
-            "robotiq_85_right_knuckle_link",
-            "robotiq_85_left_finger_link",
-            "robotiq_85_right_finger_link",
-            "robotiq_85_left_inner_knuckle_link",
-            "robotiq_85_right_inner_knuckle_link",
-            "robotiq_85_left_finger_tip_link",
-            "robotiq_85_right_finger_tip_link"
-        ]
-        
-        planning_scene = PlanningScene()
-        planning_scene.robot_state.attached_collision_objects.append(attached_object)
-        planning_scene.is_diff = True
-        planning_scene.robot_state.is_diff = True
-        
-        self.planning_scene_pub.publish(planning_scene)
-        time.sleep(0.3)
-        
-        self.get_logger().info(f"✓ Attached '{object_name}' to gripper")
-        return True
-    
-    def detach_object_from_gripper(self, object_name):
-        """Detach object from gripper - FIXED VERSION"""
-        self.get_logger().info(f"Detaching '{object_name}' from gripper...")
-        
-        # Create attached collision object message
-        attached_object = AttachedCollisionObject()
-        attached_object.link_name = self.end_effector_frame
-        
-        # The object to detach
-        collision_object = CollisionObject()
-        collision_object.id = object_name
-        collision_object.operation = CollisionObject.REMOVE
-        
-        attached_object.object = collision_object
-        
-        # Create planning scene diff
-        planning_scene = PlanningScene()
-        planning_scene.is_diff = True
-        planning_scene.robot_state.is_diff = True  # ← THIS WAS MISSING!
-        planning_scene.robot_state.attached_collision_objects.append(attached_object)
-        
-        # Publish multiple times to ensure receipt
-        self.get_logger().info(f"Publishing detach for '{object_name}'...")
-        for i in range(5):
-            self.planning_scene_pub.publish(planning_scene)
-            self.get_logger().info(f"  Published detach message {i+1}/5")
-            time.sleep(0.2)
-        
-        self.get_logger().info(f"✓ Sent detach request for '{object_name}'")
-        time.sleep(1.0)
-        
-        return True
-    
-    #======================GPT ATTACH DETACH FIX=========================
+    #======================ATTACH DETACH FIX=========================
     def attach_object_to_gripper(self, object_name):
         """Attach object from world to gripper safely."""
         self.get_logger().info(f"Attaching '{object_name}' to gripper...")
@@ -1132,9 +790,51 @@ class MoveItController(Node):
 
 
     # ==================== HIGH-LEVEL OPERATIONS ====================
+    def HIGH_LEVEL_move_ptp(self, target_pose):
+        """High-level PTP move to target pose using default planner."""
+        self.get_logger().info("Starting high-level PTP move...")
+        self.use_pilz_ptp()
+        if not self.move_to_pose(target_pose):
+            self.use_default_planner()
+            self.get_logger().error("High-level PTP move failed with Pilz planner")
+            if not self.move_to_pose(target_pose):
+                self.get_logger().error("High-level PTP move failed with default planner")
+                return False
+        self.use_default_planner()
+        self.get_logger().info("✓ High-level PTP move successful")
+        return True
+
+    def HIGH_LEVEL_move_lin(self, target_pose):
+        """High-level LIN move to target pose using default planner."""
+        self.get_logger().info("Starting high-level LIN move...")
+        self.use_pilz_lin()
+        if not self.move_to_pose(target_pose):
+            if not self.HIGH_LEVEL_move_ptp(target_pose):
+               return False
+        self.use_default_planner()
+        self.get_logger().info("✓ High-level LIN move successful")
+        return True
     
-    def pick_object(self, object_name, grasp_pose, approach_direction="side", 
-                    approach_distance=0.02, grasp_distance=0.015, 
+    def HIGH_LEVEL_move_lin_relative(self, dx=0.0, dy=0.0, dz=0.0):
+        """High-level LIN relative move using default planner."""
+        self.get_logger().info("Starting high-level LIN relative move...")
+        # self.use_pilz_lin()
+        current_pose = self.get_current_pose()
+        if current_pose is None:
+            self.get_logger().error("Cannot perform LIN relative move - current pose unreachable")
+            self.use_default_planner()
+            return False
+        target_pose = deepcopy(current_pose)
+        target_pose.position.x += dx
+        target_pose.position.y += dy
+        target_pose.position.z += dz
+        if not self.HIGH_LEVEL_move_lin(target_pose):
+            return False
+        self.get_logger().info("✓ High-level LIN relative move successful")
+        return True
+    
+    def pick_object(self, object_name, grasp_pose, approach_direction="side",
+                    approach_distance=0.02, grasp_distance=0.015,
                     lift_distance=0.2, grip_force=0.6):
         """
         Execute complete pick operation using Pilz planners.
@@ -1165,12 +865,9 @@ class MoveItController(Node):
             f"Step 1: Moving to approach pose (Pilz PTP) -> "
             f"{approach_pose.position.x:.3f}, {approach_pose.position.y:.3f}, {approach_pose.position.z:.3f}"
         )
-        self.use_pilz_ptp()
-        if not self.move_to_pose(approach_pose):
-            self.use_default_planner()
+        if not self.HIGH_LEVEL_move_lin(approach_pose):
             self.get_logger().error("Failed to reach approach pose")
             return False
-        self.use_default_planner()
 
         # Step 2: Open gripper
         self.get_logger().info("Step 2: Opening gripper...")
@@ -1197,9 +894,10 @@ class MoveItController(Node):
         else:
             self.get_logger().warn("Failed to get current pose before LIN approach")
 
-        if not self.move_lin_relative(dx=delta_x, dz=delta_z):
-            self.get_logger().error("Pilz LIN approach failed")
+        if not self.HIGH_LEVEL_move_lin_relative(dx=delta_x, dz=delta_z):
+            self.get_logger().error("Failed to approach object")
             return False
+        time.sleep(0.5)
 
         # Step 4: Remove and attach object to gripper
         self.get_logger().info("Step 4: Attaching object to gripper for collision avoidance...")
@@ -1217,226 +915,14 @@ class MoveItController(Node):
 
         # Step 6: Lift vertically using Pilz LIN
         self.get_logger().info(f"Step 6: Lifting object using Pilz LIN ({lift_distance} m)...")
-        if not self.lift_with_pilz(lift_height=lift_distance, linear=True):
+        if not self.HIGH_LEVEL_move_lin_relative(dz=lift_distance):
             self.get_logger().error("Failed to lift object")
             return False
-
+        time.sleep(0.5)
+        
         self.get_logger().info("✓ Pick operation completed successfully")
         return True
 
-
-    
-    def place_object(self, object_name, place_pose, retreat_distance=0.2):
-        """
-        Execute complete place operation
-        
-        Args:
-            object_name: Name of object to place
-            place_pose: Target place pose
-            retreat_distance: Distance to retreat after placing (m)
-        
-        Returns:
-            bool: True if successful
-        """
-        self.get_logger().info(f"Starting place operation for '{object_name}'")
-        
-        # Step 1: Move to place pose
-        self.get_logger().info("Step 1: Moving to place pose...")
-        current_pose = self.get_current_pose()
-        dx = place_pose.position.x - current_pose.position.x
-        dy = place_pose.position.y - current_pose.position.y
-        dz = place_pose.position.z - current_pose.position.z
-        if self.cartesian_available and not self.move_relative_cartesian(delta_x=dx, delta_y=dy, delta_z=dz):
-            self.get_logger().warn("Cartesian lift failed, using standard planning")
-            if not self.move_to_pose(place_pose):
-                return False
-        elif not self.cartesian_available:
-            if not self.move_to_pose(place_pose):
-                return False
-            
-        # Step 2: Open gripper
-        self.get_logger().info("Step 2: Opening gripper to release object...")
-        #DEBUG: 
-        if self.get_current_pose():
-            current_pose = self.get_current_pose()
-            self.get_logger().info(f"Current pose of gripper: {current_pose.position.x+self.GRIPPER_INNER_LENGTH:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z:.3f}")
-        else:
-            self.get_logger().info("Failed to get current pose for debug")
-        if not self.open_gripper():
-            self.get_logger().error("Failed to open gripper")
-            return False
-        time.sleep(1.0)
-        
-        #Step 3: Lower object slightly to ensure release
-        # self.get_logger().info("Step 3: Lowering object slightly to ensure release...")
-        # if self.cartesian_available and not self.move_relative_cartesian(delta_z= -retreat_distance):
-        #     self.get_logger().warn("Cartesian lower failed, using standard planning")
-        #     current_pose = self.get_current_pose()
-        #     if current_pose:
-        #         current_pose.position.z -= retreat_distance
-        #         if not self.move_to_pose(current_pose):
-        #             return False
-        #     else:
-        #         return False
-        # elif not self.cartesian_available:
-        #     current_pose = self.get_current_pose()
-        #     if current_pose:
-        #         current_pose.position.z -= retreat_distance
-        #         if not self.move_to_pose(current_pose):
-        #             return False
-        #     else:
-        #         return False
-        # Step 4: Detach object
-        self.get_logger().info("Step 4: Detaching object from gripper...")
-        self.detach_object_from_gripper(object_name)
-
-        # Step 5: Retreat using Cartesian path
-        self.get_logger().info(f"Step 5: Retreating ({retreat_distance}m)...")
-        if not self.move_relative_cartesian(delta_z=retreat_distance):
-            # Fallback
-            current_pose = self.get_current_pose()
-            if current_pose:
-                current_pose.position.z += retreat_distance
-                if not self.move_to_pose(current_pose):
-                    return False
-        
-        self.get_logger().info("✓ Place operation completed successfully")
-        return True
-    
-    def move_to_pose_pilz_ptp(self, target_pose, velocity_scaling=0.2):
-        """
-        Use Pilz PTP (point-to-point) planner for efficient movement
-        PTP doesn't maintain Cartesian straight line, but is faster and more reliable
-        """
-        self.get_logger().info("Planning with Pilz PTP planner...")
-        
-        request = GetMotionPlan.Request()
-        request.motion_plan_request.workspace_parameters.header.frame_id = self.base_frame
-        request.motion_plan_request.workspace_parameters.header.stamp = self.get_clock().now().to_msg()
-        request.motion_plan_request.group_name = self.arm_group_name
-        request.motion_plan_request.allowed_planning_time = 5.0
-        request.motion_plan_request.max_velocity_scaling_factor = velocity_scaling
-        request.motion_plan_request.max_acceleration_scaling_factor = velocity_scaling
-        
-        # Use PTP instead of LIN
-        request.motion_plan_request.planner_id = "PTP"  # Point-to-point
-        request.motion_plan_request.pipeline_id = "pilz_industrial_motion_planner"
-        
-        # Add goal constraints (similar to move_linear_pilz but with PTP)
-        constraints = Constraints()
-        
-        pos_constraint = PositionConstraint()
-        pos_constraint.header.frame_id = self.base_frame
-        pos_constraint.link_name = self.end_effector_frame
-        pos_constraint.constraint_region.primitive_poses.append(target_pose)
-        
-        pos_prim = SolidPrimitive()
-        pos_prim.type = SolidPrimitive.BOX
-        pos_prim.dimensions = [0.01, 0.01, 0.01]
-        pos_constraint.constraint_region.primitives.append(pos_prim)
-        pos_constraint.weight = 1.0
-        constraints.position_constraints.append(pos_constraint)
-        
-        orient_constraint = OrientationConstraint()
-        orient_constraint.header.frame_id = self.base_frame
-        orient_constraint.link_name = self.end_effector_frame
-        orient_constraint.orientation = target_pose.orientation
-        orient_constraint.absolute_x_axis_tolerance = 0.1
-        orient_constraint.absolute_y_axis_tolerance = 0.1
-        orient_constraint.absolute_z_axis_tolerance = 0.1
-        orient_constraint.weight = 1.0
-        constraints.orientation_constraints.append(orient_constraint)
-        
-        request.motion_plan_request.goal_constraints.append(constraints)
-        
-        if not self.pilz_planning_client.wait_for_service(timeout_sec=2.0):
-            return False
-        
-        future = self.pilz_planning_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        
-        if not future.done() or future.result().motion_plan_response.error_code.val != MoveItErrorCodes.SUCCESS:
-            return False
-        
-        return self.execute_trajectory(
-            future.result().motion_plan_response.trajectory,
-            max_velocity_scaling=velocity_scaling
-        )
-
-    def place_object_with_start(self, object_name, start_pose, place_pose, retreat_distance=0.2):
-        """
-        Execute complete place operation
-        
-        Args:
-            object_name: Name of object to place
-            start_pose: Starting pose of object before placing
-            place_pose: Target place pose
-            retreat_distance: Distance to retreat after placing (m)
-        
-        Returns:
-            bool: True if successful
-        """
-        self.get_logger().info(f"Starting place operation for '{object_name}'")
-    
-        # Step 1: Move to place pose with multi-segment
-        self.get_logger().info("Step 1: Moving to place pose...")
-        
-        # Calculate distance to decide approach
-        dx = place_pose.position.x - start_pose.position.x
-        dy = place_pose.position.y - start_pose.position.y
-        dz = place_pose.position.z - start_pose.position.z
-        distance = (dx**2 + dy**2 + dz**2)**0.5
-
-        current_pose = self.get_current_pose()
-        target_pose = self.get_current_pose()
-        target_pose.position.x += dx
-        target_pose.position.y += dy
-        target_pose.position.z += dz
-
-        if not self.move_to_pose_pilz_ptp(target_pose, velocity_scaling=0.2):
-            self.get_logger().warn("Pilz PTP move failed, using multi-segment approach")
-            if not self.move_linear_pilz(target_pose, velocity_scaling=0.15):
-                self.get_logger().warn("Pilz LIN move failed, using multi-segment Cartesian")
-                if not self.move_relative_cartesian(delta_x=dx, delta_y=dy, delta_z=dz):
-                    self.get_logger().error("Multi-segment move failed, using standard planning")
-                    if not self.move_to_pose(place_pose):
-                        return False
-
-        # Step 2: Open gripper
-        self.get_logger().info("Step 2: Opening gripper to release object...")
-        #DEBUG: 
-        if self.get_current_pose():
-            current_pose = self.get_current_pose()
-            self.get_logger().info(f"Current pose of gripper: {current_pose.position.x+self.GRIPPER_INNER_LENGTH:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z:.3f}")
-        else:
-            self.get_logger().info("Failed to get current pose for debug")
-        if not self.open_gripper():
-            self.get_logger().error("Failed to open gripper")
-            return False
-        time.sleep(1.0)
-
-      
-        # Step 4: Retreat using Cartesian path
-        self.get_logger().info(f"Step 4: Pilz LIN retreat ({retreat_distance}m)...")
-        if not self.retreat_linear_pilz(distance=retreat_distance, velocity_scaling=0.15):
-            self.get_logger().warn("Pilz retreat failed, using fallback")
-            # Fallback to multi-segment
-            if not self.retreat_smooth(distance=retreat_distance, segment_size=0.06):
-                self.get_logger().error("Smooth retreat methods failed. Using standard planning")
-                current_pose = self.get_current_pose()
-                current_pose.position.z += retreat_distance
-                if not self.move_to_pose(current_pose):
-                    self.get_logger().error("Standard planning failed")
-                    return False
-                
-
-          # Step 3: Detach object
-        self.get_logger().info("Step 3: Detaching object from gripper...")
-        self.detach_object_from_gripper(object_name)
-
-        
-        self.get_logger().info("✓ Place operation completed successfully")
-        return True
 
     def place_object_with_start(self, object_name, start_pose, place_pose, retreat_distance=0.15):
         """
@@ -1463,8 +949,7 @@ class MoveItController(Node):
         # Step 1: Move to place pre-pose (above) using PTP
         dx = place_pose.position.x - start_pose.position.x
         dy = place_pose.position.y - start_pose.position.y
-        dz = place_pose.position.z - start_pose.position.z
-        distance = (dx**2 + dy**2 + dz**2)**0.5
+        # dz = place_pose.position.z - start_pose.position.z
 
         # current_pose = self.get_current_pose()
         place_pre_pose_eef = self.get_current_pose()
@@ -1474,34 +959,24 @@ class MoveItController(Node):
         # place_pre_pose_eef.position.z += retreat_distance  # go above by retreat_distance
 
         self.get_logger().info(
-            f"Step 1: Moving to place pre-pose (Pilz PTP) -> "
+            f"Step 1: Moving to place pre-pose x, y (Pilz PTP) -> "
             f"{place_pre_pose_eef.position.x:.3f}, {place_pre_pose_eef.position.y:.3f}, {place_pre_pose_eef.position.z:.3f}"
         )
 
-        if not self.move_lin_relative(dx=dx, dy=dy):
-            self.get_logger().warn("Cartesian move failed, using Pilz PTP")
-            self.use_pilz_ptp()
-            if not self.move_to_pose(place_pre_pose_eef):
-                self.use_default_planner()
-                if not self.move_to_pose(place_pre_pose_eef):
-                    self.get_logger().error("Failed to reach place pre-pose")
-                    return False
-            self.use_default_planner()
+        if not self.HIGH_LEVEL_move_lin_relative(dx=dx, dy=dy):
+            self.get_logger().error("Failed to reach place pre-pose")
+            return False
+        time.sleep(0.5)
 
         # Step 2: Descend with Pilz LIN to place pose
         dz = place_pose.position.z - place_pre_pose_eef.position.z
         self.get_logger().info(
             f"Step 2: Descending to place pose (Pilz LIN) -> with dz={dz:.3f} m -> "
         )
-        if not self.move_lin_relative(dz=dz):
-            self.get_logger().warn("Cartesian descent failed, using Pilz PTP")
-            self.use_pilz_ptp()
-            if not self.move_to_pose(place_pose):
-                self.use_default_planner()
-                if not self.move_to_pose(place_pose):
-                    self.get_logger().error("Failed to descend to place pose")
-                    return False
-            self.use_default_planner()
+        if not self.HIGH_LEVEL_move_lin_relative(dz=dz):
+            self.get_logger().error("Failed to descend to place pose")
+            return False
+        time.sleep(0.5)
 
         # Step 3: Open gripper (release object)
         self.get_logger().info("Step 3: Opening gripper to release object...")
@@ -1521,22 +996,10 @@ class MoveItController(Node):
 
         # Step 4: Retreat upward using Pilz LIN
         self.get_logger().info(f"Step 4: Retreating upward by {retreat_distance} m (Pilz LIN)...")
-        if not self.move_lin_relative(dz=retreat_distance):
-            self.get_logger().warn("Pilz LIN retreat failed, attempting fallback")
-            current_pose = self.get_current_pose()
-            if current_pose:
-                self.use_pilz_ptp()
-                current_pose.position.z += retreat_distance
-                if not self.move_to_pose(current_pose):
-                    self.use_default_planner()
-                    if not self.move_to_pose(current_pose):
-                        self.get_logger().error("Fallback retreat failed")
-                        return False
-                self.use_default_planner()
-            else:
-                self.get_logger().error("Failed to get current pose for fallback retreat")
-                return False
-
+        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
+            self.get_logger().error("Failed to retreat upward")
+            return False
+        
         # Step 5: Detach object from gripper
         self.get_logger().info("Step 5: Detaching object from gripper...")
         self.detach_object_from_gripper(object_name)
