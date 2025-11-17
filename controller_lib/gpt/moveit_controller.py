@@ -20,8 +20,10 @@ from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.msg import JointConstraint, Constraints, PositionConstraint, OrientationConstraint
-from moveit_msgs.msg import MotionPlanRequest, PlanningOptions
+from moveit_msgs.msg import MotionPlanRequest, PlanningOptions, RobotState
 from moveit_msgs.srv import GetMotionPlan
+from sensor_msgs.msg import JointState
+from tf_transformations import quaternion_multiply, quaternion_from_euler
 import time
 import math
 import tf2_ros
@@ -114,6 +116,15 @@ class MoveItController(Node):
         self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=10.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
+        # Joint state subscriber for IK seed
+        self.current_joint_state = None
+        self.joint_state_sub = self.create_subscription(
+            JointState,
+            '/joint_states',
+            self._joint_state_callback,
+            10
+        )
+        
         # Wait for action server
         self.get_logger().info("Waiting for MoveGroup action server...")
         if not self.move_group_client.wait_for_server(timeout_sec=10.0):
@@ -144,6 +155,19 @@ class MoveItController(Node):
             self.get_logger().warn("Execute trajectory server not available")
         
         self.get_logger().info("✓ MoveIt2 Controller initialized")
+    
+    def _joint_state_callback(self, msg):
+        """Store current joint state for IK seed"""
+        self.current_joint_state = msg
+    
+    def _get_start_state(self):
+        """Get current robot state as start state for planning"""
+        if self.current_joint_state is None:
+            return None
+        
+        robot_state = RobotState()
+        robot_state.joint_state = self.current_joint_state
+        return robot_state
     
     # ==================== POSE UTILITIES ====================
     
@@ -202,17 +226,49 @@ class MoveItController(Node):
     
     def move_to_pose(self, target_pose, planning_time=7.0, max_retries=5):
         """Move arm to target pose; auto-retry if MoveIt returns INVALID_MOTION_PLAN."""
+        # Adjust parameters for Pilz planners (they need more time and attempts)
+        is_pilz = (self.planning_pipeline_id == "pilz_industrial_motion_planner")
+        if is_pilz:
+            planning_time = max(planning_time, 10.0)  # At least 10s for Pilz
+            max_planning_attempts = 30  # More attempts for Pilz
+            # Start with more relaxed constraints for Pilz
+            initial_box = 0.10  # Start at 10cm instead of 5cm
+            initial_ori_tol = 0.05  # Start at 0.05rad instead of 0.005rad
+            max_retries = 2
+        else:
+            max_planning_attempts = 12
+            initial_box = 0.02
+            initial_ori_tol = 0.005
+        
         for attempt in range(1, max_retries + 1):
+                # Relax FASTER for Pilz
+            if is_pilz:
+                box = initial_box + 0.03 * (attempt - 1)  # Bigger steps
+                ori_tol = initial_ori_tol + 0.02 * (attempt - 1)
+            else:
+                box = initial_box + 0.01 * (attempt - 1)
+                ori_tol = initial_ori_tol + 0.005 * (attempt - 1)
             # Gradually relax constraints each attempt
-            box = 0.02 + 0.01 * (attempt - 1)      # 2cm → 5cm
-            ori_tol = 0.005 + 0.005 * (attempt - 1)  # 0.005rad → 0.02rad
+            box = initial_box + 0.01 * (attempt - 1)
+            # ori_tol = initial_ori_tol + 0.005 * (attempt - 1)
 
             goal = MoveGroup.Goal()
             goal.request.group_name = self.arm_group_name
-            goal.request.num_planning_attempts = 12
+            goal.request.num_planning_attempts = max_planning_attempts
             goal.request.allowed_planning_time = planning_time
             goal.request.max_velocity_scaling_factor = 0.15
             goal.request.max_acceleration_scaling_factor = 0.15
+
+            # 👉 Set start state (current joint state) to help IK solver
+            # This significantly improves IK success rate, especially for Pilz planners
+            start_state = self._get_start_state()
+            if start_state is not None:
+                goal.request.start_state = start_state
+                if attempt == 1:  # Log only on first attempt to avoid spam
+                    self.get_logger().debug("Using current joint state as IK seed")
+            else:
+                if attempt == 1:
+                    self.get_logger().debug("Joint state not available yet, using default start state")
 
             # 👉 Apply current planner selection (Pilz / OMPL)
             if self.planning_pipeline_id:
@@ -304,6 +360,118 @@ class MoveItController(Node):
         self.get_logger().error("All planning retries exhausted.")
         return False
     
+    #=====================HOME POSITION========================
+    def move_to_home_position(self):
+        """
+        Move arm to safe home position using joint control
+        
+        Joint values from Kinova Web App:
+        - joint_1: 0°
+        - joint_2: 15°
+        - joint_3: 180°
+        - joint_4: -130°
+        - joint_5: 0°
+        - joint_6: 55°
+        - joint_7: 90°
+        """
+        self.get_logger().info("Moving to HOME position...")
+        
+        # Convert degrees to radians
+        home_joint_positions = [
+            math.radians(0),    # joint_1
+            math.radians(15),   # joint_2
+            math.radians(180),  # joint_3
+            math.radians(-130), # joint_4
+            math.radians(0),    # joint_5
+            math.radians(55),   # joint_6
+            math.radians(90)    # joint_7
+        ]
+        
+        return self.move_to_joint_positions(home_joint_positions)
+
+
+    def move_to_joint_positions(self, joint_positions, planning_time=10.0):
+        """
+        Move arm to specific joint configuration
+        
+        Args:
+            joint_positions: List of 7 joint angles in radians
+            planning_time: Time allowed for planning
+        
+        Returns:
+            bool: True if successful
+        """
+        if len(joint_positions) != 7:
+            self.get_logger().error(f"Expected 7 joint values, got {len(joint_positions)}")
+            return False
+        
+        goal = MoveGroup.Goal()
+        goal.request.group_name = self.arm_group_name
+        goal.request.num_planning_attempts = 15
+        goal.request.allowed_planning_time = planning_time
+        
+        # Use slower speeds for safety
+        goal.request.max_velocity_scaling_factor = 0.2
+        goal.request.max_acceleration_scaling_factor = 0.2
+        
+        # Set start state
+        start_state = self._get_start_state()
+        if start_state is not None:
+            goal.request.start_state = start_state
+        
+        # Create joint constraints for target position
+        constraints = Constraints()
+        
+        joint_names = [
+            "joint_1", "joint_2", "joint_3", "joint_4",
+            "joint_5", "joint_6", "joint_7"
+        ]
+        
+        for joint_name, position in zip(joint_names, joint_positions):
+            joint_constraint = JointConstraint()
+            joint_constraint.joint_name = joint_name
+            joint_constraint.position = position
+            joint_constraint.tolerance_above = 0.01  # ~0.57°
+            joint_constraint.tolerance_below = 0.01
+            joint_constraint.weight = 1.0
+            constraints.joint_constraints.append(joint_constraint)
+        
+        goal.request.goal_constraints.append(constraints)
+        
+        self.get_logger().info(f"Planning to HOME joint configuration...")
+        
+        # Send goal
+        future = self.move_group_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+        
+        if not future.done():
+            self.get_logger().error("Move to home goal send timed out")
+            return False
+        
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Move to home goal rejected")
+            return False
+        
+        # Wait for result
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=planning_time + 10.0)
+        
+        if not result_future.done():
+            self.get_logger().error("Move to home result timed out")
+            return False
+        
+        result = result_future.result()
+        success = result.result.error_code.val == MoveItErrorCodes.SUCCESS
+        
+        if success:
+            self.get_logger().info("✓ Reached HOME position")
+        else:
+            error_str = self._error_to_string(result.result.error_code.val)
+            self.get_logger().error(f"✗ Failed to reach HOME: {error_str}")
+        
+        return success
+        
     #=====================CHATGPT PILZ==============================
     def move_lin_relative(self, dx=0.0, dy=0.0, dz=0.0, planning_time=5.0):
         """
@@ -379,7 +547,49 @@ class MoveItController(Node):
         self.use_default_planner()
         return success
 
+    #====================ROTATE EEF ================================
+    def rotate_eef_relative(self, roll=0.0, pitch=0.0, yaw=0.0):
+        """
+        Rotate end-effector by Euler increments (relative rotation).
+        Positive rotation follows REP-103 (X=roll, Y=pitch, Z=yaw).
+        """
 
+        current = self.get_current_pose()
+        if not current:
+            self.get_logger().error("Cannot rotate EEF — no current pose")
+            return False
+
+        # Current quaternion
+        q_current = [
+            current.orientation.x,
+            current.orientation.y,
+            current.orientation.z,
+            current.orientation.w,
+        ]
+
+        # Desired relative rotation
+        q_delta = quaternion_from_euler(roll, pitch, yaw)
+
+        # New target orientation = q_current ⨉ q_delta
+        q_new = quaternion_multiply(q_current, q_delta)
+
+        target = deepcopy(current)
+        target.orientation.x = q_new[0]
+        target.orientation.y = q_new[1]
+        target.orientation.z = q_new[2]
+        target.orientation.w = q_new[3]
+
+        # Use a smooth Pilz LIN OR a slower OMPL fallback
+        self.use_pilz_lin()
+        if not self.move_to_pose(target):
+            self.get_logger().warn("Pilz LIN rotate failed; falling back to standard planning")
+            self.use_default_planner()
+            if not self.move_to_pose(target):
+                self.get_logger().error("Final fallback standard planning rotate failed")
+                return False
+        self.use_default_planner()
+
+        return True
 
     # ==================== PLANNER SELECTION (PILZ / OMPL) ====================
 
@@ -594,8 +804,8 @@ class MoveItController(Node):
                 ]
             else:
                 positions = [
-                    self.gripper_max_close_left * 0.8,
-                    self.gripper_max_close_right * 0.8
+                    self.gripper_max_close_left * 0.6,
+                    self.gripper_max_close_right * 0.6
                 ]
         else:
             return False
@@ -631,7 +841,7 @@ class MoveItController(Node):
         """Open gripper"""
         return self.control_gripper("open")
     
-    def close_gripper(self, grip_force=0.8):
+    def close_gripper(self, grip_force=0.5):
         """Close Robotiq 85 gripper with specific grip force"""
         return self.control_gripper("close", grip_force)
     
@@ -788,7 +998,6 @@ class MoveItController(Node):
 
         return True
 
-
     # ==================== HIGH-LEVEL OPERATIONS ====================
     def HIGH_LEVEL_move_ptp(self, target_pose):
         """High-level PTP move to target pose using default planner."""
@@ -833,9 +1042,31 @@ class MoveItController(Node):
         self.get_logger().info("✓ High-level LIN relative move successful")
         return True
     
+    def HIGH_LEVEL_pour(self, pour_angle_degree=45):
+        """
+        Execute a pouring motion by rotating the end-effector.
+
+        Args:
+            pour_angle_degree: Angle to rotate around Y-axis in degrees
+        """
+        pour_angle_rad = math.radians(pour_angle_degree)
+        self.get_logger().info(f"Starting pouring motion by {pour_angle_rad:.2f} rad...")
+
+        # Rotate end-effector around Y-axis
+        if not self.rotate_eef_relative(yaw=pour_angle_rad):
+            self.get_logger().error("Pouring motion failed")
+            return False
+        
+        if not self.rotate_eef_relative(yaw=-pour_angle_rad):
+            self.get_logger().error("Returning from pouring motion failed")
+            return False
+
+        self.get_logger().info("✓ Pouring motion completed successfully")
+        return True
+
     def pick_object(self, object_name, grasp_pose, approach_direction="side",
                     approach_distance=0.02, grasp_distance=0.015,
-                    lift_distance=0.2, grip_force=0.6):
+                    lift_distance=0.2, grip_force=0.5):
         """
         Execute complete pick operation using Pilz planners.
 
@@ -1002,6 +1233,102 @@ class MoveItController(Node):
         
         # Step 5: Detach object from gripper
         self.get_logger().info("Step 5: Detaching object from gripper...")
+        self.detach_object_from_gripper(object_name)
+
+        self.get_logger().info("✓ Place operation completed successfully")
+        return True
+
+    def place_pour_object(self, object_name, start_pose, place_pose, pour_angle_degree=45,
+                          retreat_distance=0.15):
+        """
+        Place and pour operation: place the object and perform a pouring motion.
+
+        Args:
+            object_name: Name of object to place (collision id)
+            start_pose: Starting pose of object before placing
+            place_pose: Target place pose
+            pour_angle_degree: Angle to rotate for pouring (degrees)
+            retreat_distance: Distance to retreat upward after placing (m)
+        Returns:
+            bool: True if successful
+        
+        """
+
+        self.get_logger().info(f"Starting place operation for '{object_name}'")
+
+        # Step 1: Move to place pre-pose (above) using PTP
+        dx = place_pose.position.x - start_pose.position.x
+        dy = place_pose.position.y - start_pose.position.y
+        # dz = place_pose.position.z - start_pose.position.z
+
+        # current_pose = self.get_current_pose()
+        place_pre_pose_eef = self.get_current_pose()
+        place_pre_pose_eef.position.x += dx
+        place_pre_pose_eef.position.y += dy
+
+        # place_pre_pose_eef.position.z += retreat_distance  # go above by retreat_distance
+
+        self.get_logger().info(
+            f"Step 1: Moving to place pre-pose x, y (Pilz PTP) -> "
+            f"{place_pre_pose_eef.position.x:.3f}, {place_pre_pose_eef.position.y:.3f}, {place_pre_pose_eef.position.z:.3f}"
+        )
+
+        if not self.HIGH_LEVEL_move_lin_relative(dx=dx, dy=dy):
+            self.get_logger().error("Failed to reach place pre-pose")
+            return False
+        time.sleep(0.5)
+
+
+        # Step 2: Descend with Pilz LIN to pour height
+        z_pour = place_pose.position.z + 0.15
+        dz = z_pour - place_pre_pose_eef.position.z
+        self.get_logger().info(
+            f"Step 2: Descending to pour height (Pilz LIN) -> with dz={dz:.3f} m -> "
+        )
+        if not self.HIGH_LEVEL_move_lin_relative(dz=dz):
+            self.get_logger().error("Failed to descend to pour height")
+            return False
+        time.sleep(0.5)
+
+        #Step 3: Pouring motion
+        if not self.HIGH_LEVEL_pour(pour_angle_degree):
+            self.get_logger().error("Pouring motion failed")
+            return False
+        
+        #Step 3: Descend with Pilz LIN to place pose
+        dz = place_pose.position.z - self.get_current_pose().position.z
+        self.get_logger().info(
+            f"Step 3: Descending to place pose (Pilz LIN) -> with dz={dz:.3f} m -> "
+        )
+        if not self.HIGH_LEVEL_move_lin_relative(dz=dz):
+            self.get_logger().error("Failed to descend to place pose")
+            return False
+        time.sleep(0.5)
+
+        # Step 4: Open gripper (release object)
+        self.get_logger().info("Step 4: Opening gripper to release object...")
+        if self.get_current_pose():
+            current_pose = self.get_current_pose()
+            self.get_logger().info(
+                f"  Current gripper tip approx: "
+                f"{current_pose.position.x+self.GRIPPER_INNER_LENGTH:.3f}, "
+                f"{current_pose.position.y:.3f}, {current_pose.position.z:.3f}"
+            )
+        else:
+            self.get_logger().info("  Failed to get current pose for debug")
+        if not self.open_gripper():
+            self.get_logger().error("Failed to open gripper")
+            return False
+        time.sleep(1.0)
+
+        # Step 5: Retreat upward using Pilz LIN
+        self.get_logger().info(f"Step 5: Retreating upward by {retreat_distance} m (Pilz LIN)...")
+        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
+            self.get_logger().error("Failed to retreat upward")
+            return False
+
+        # Step 6: Detach object from gripper
+        self.get_logger().info("Step 6: Detaching object from gripper...")
         self.detach_object_from_gripper(object_name)
 
         self.get_logger().info("✓ Place operation completed successfully")
