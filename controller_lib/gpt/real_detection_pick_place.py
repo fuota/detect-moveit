@@ -40,7 +40,7 @@ class RealDetectionPickPlaceController(MoveItController):
             'dz': -0.37,
             'width': 0.55,
             'depth': 0.55,
-            'height': 0.66
+            'height': 0.625
         }
 
         self.serving_area = [(self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475, self.workspace_table['dz']+self.workspace_table['height']),
@@ -228,6 +228,67 @@ class RealDetectionPickPlaceController(MoveItController):
         self.get_logger().info("="*60)
     
     # ==================== PICK EXECUTION ====================
+    def execute_pick_move_sequence(self, marker_id, place_pose):
+        self.is_moving = True
+        self.get_logger().info("🔒 Movement started - blocking all pose updates")
+        
+        self.get_logger().info(f"\n{'='*60}")
+        self.get_logger().info(f"Starting pick and place sequence for marker {marker_id}")
+        self.get_logger().info(f"{'='*60}")
+        
+        obj_data = self.detected_objects.get(marker_id)
+        if not obj_data or not obj_data.get('pose'):
+            self.get_logger().error("No pose data available!")
+            self.is_moving = False
+            return False
+        
+        object_pose = obj_data['pose']
+        object_name = f"detected_object_{marker_id}"
+
+        self.move_to_home_position()
+        # ==================== PICK PHASE ====================
+        # approach_distance = 0.0  # Meters from the gripper to the object before pick
+        grasp_distance = 0.02  # Meters from the gripper to the object after pick
+        # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
+
+        self.get_logger().info(
+            f"Target place pose: x={place_pose.position.x:.3f}, "
+            f"y={place_pose.position.y:.3f}, z={place_pose.position.z:.3f}")
+        
+        move_success = self.grasp_move_object(object_name, object_pose, place_pose, grasp_distance=grasp_distance)
+        if not move_success:
+            self.get_logger().error("✗ Move operation failed!")
+            self.is_moving = False
+            self.get_logger().info("🔓 Movement completed - resuming pose updates")
+            return False
+        
+        else:
+            self.get_logger().info("✓ Place operation completed successfully!")
+            if self.get_current_pose():
+                object_pose = self.get_current_pose()                    
+                object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance
+                object_pose.position.z = place_pose.position.z
+                self.get_logger().info(f"Marker {marker_id} placed at: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
+                self.detected_objects[marker_id]['pose'] = object_pose
+                self.get_logger().info(f"Add collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
+                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+            else:
+                self.get_logger().warn(f"Failed to get current pose for object {marker_id}")
+                object_pose = place_pose
+                self.detected_objects[marker_id]['pose'] = object_pose
+                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.get_logger().info(f"Added collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
+      
+        # CRITICAL: Release movement flag to allow updates again
+        self.picked_objects.add(marker_id)
+
+        self.is_moving = False
+        self.get_logger().info("🔓 Movement completed - resuming pose updates")
+
+        return move_success
+
+        
+
     def execute_pick_and_place_sequence(self, marker_id, place_pose):
         """
         Execute complete pick and place sequence for selected object
@@ -261,7 +322,7 @@ class RealDetectionPickPlaceController(MoveItController):
         # approach_distance = 0.0  # Meters from the gripper to the object before pick
         grasp_distance = 0.02  # Meters from the gripper to the object after pick
         self.get_logger().info("\n--- PICK PHASE ---")
-        self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
+        # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
         pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance)
  
         if not pick_success:
@@ -359,12 +420,11 @@ class RealDetectionPickPlaceController(MoveItController):
         # approach_distance = 0.0  # Meters from the gripper to the object before pick
         grasp_distance = 0.02  # Meters from the gripper to the object after pick
         self.get_logger().info("===================== PICK PHASE ====================")
-        self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
+        # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
         pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance)
  
         if not pick_success:
             self.get_logger().error("✗ Pick operation failed!")
-            print("\n✗ Pick failed!")
             self.is_moving = False
             self.get_logger().info("🔓 Movement completed - resuming pose updates")
             return False
@@ -559,7 +619,7 @@ class RealDetectionPickPlaceController(MoveItController):
         self.get_logger().info("Preparing to pick medicine bottle...")
         medicine_place_pose = self.convert_serving_area_to_pose(self.serving_area[3])
         medicine_place_pose.position.z += self.detected_objects[7]['height'] / 2  # Adjust for object height
-        if not self.execute_pick_and_place_sequence(7, place_pose=medicine_place_pose):  # Pick and place medicine bottle
+        if not self.execute_pick_move_sequence(7, place_pose=medicine_place_pose):  # Pick and place medicine bottle
             self.get_logger().error("Failed to prepare medicine - medicine bottle pick and place failed")
             return False
         self.get_logger().info("Medicine bottle placed successfully, medicine preparation completed!")

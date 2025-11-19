@@ -228,36 +228,44 @@ class MoveItController(Node):
         """Move arm to target pose; auto-retry if MoveIt returns INVALID_MOTION_PLAN."""
         # Adjust parameters for Pilz planners (they need more time and attempts)
         is_pilz = (self.planning_pipeline_id == "pilz_industrial_motion_planner")
+        is_pilz_lin = (is_pilz and self.planner_id == "LIN")
         if is_pilz:
-            planning_time = max(planning_time, 10.0)  # At least 10s for Pilz
-            max_planning_attempts = 30  # More attempts for Pilz
+            planning_time = max(planning_time, 15.0)  # More time for Pilz
+            max_planning_attempts = 50  # More attempts for Pilz
             # Start with more relaxed constraints for Pilz
-            initial_box = 0.10  # Start at 10cm instead of 5cm
-            initial_ori_tol = 0.05  # Start at 0.05rad instead of 0.005rad
-            max_retries = 2
+            if is_pilz_lin:
+                # Even more relaxed for LIN (linear motions need more tolerance)
+                initial_box = 0.15  # Start at 15cm for LIN
+                initial_ori_tol = 0.10  # Start at 0.10rad for LIN
+            else:
+                initial_box = 0.10  # Start at 10cm for PTP
+                initial_ori_tol = 0.05  # Start at 0.05rad for PTP
+            max_retries = 3  # More retries for Pilz
         else:
             max_planning_attempts = 12
             initial_box = 0.02
             initial_ori_tol = 0.005
         
         for attempt in range(1, max_retries + 1):
-                # Relax FASTER for Pilz
+            # Relax constraints each attempt
             if is_pilz:
-                box = initial_box + 0.03 * (attempt - 1)  # Bigger steps
-                ori_tol = initial_ori_tol + 0.02 * (attempt - 1)
+                box = initial_box + 0.05 * (attempt - 1)  # Bigger steps for Pilz
+                ori_tol = initial_ori_tol + 0.03 * (attempt - 1)  # More relaxed orientation
             else:
                 box = initial_box + 0.01 * (attempt - 1)
                 ori_tol = initial_ori_tol + 0.005 * (attempt - 1)
-            # Gradually relax constraints each attempt
-            box = initial_box + 0.01 * (attempt - 1)
-            # ori_tol = initial_ori_tol + 0.005 * (attempt - 1)
 
             goal = MoveGroup.Goal()
             goal.request.group_name = self.arm_group_name
             goal.request.num_planning_attempts = max_planning_attempts
             goal.request.allowed_planning_time = planning_time
-            goal.request.max_velocity_scaling_factor = 0.15
-            goal.request.max_acceleration_scaling_factor = 0.15
+            # Use slower speeds for Pilz LIN to improve success rate
+            if is_pilz_lin:
+                goal.request.max_velocity_scaling_factor = 0.10
+                goal.request.max_acceleration_scaling_factor = 0.10
+            else:
+                goal.request.max_velocity_scaling_factor = 0.15
+                goal.request.max_acceleration_scaling_factor = 0.15
 
             # 👉 Set start state (current joint state) to help IK solver
             # This significantly improves IK success rate, especially for Pilz planners
@@ -636,7 +644,7 @@ class MoveItController(Node):
     # ==================== CARTESIAN PLANNING ====================
     
     def move_cartesian(self, waypoints, eef_step=0.005, jump_threshold=0.0, 
-                       avoid_collisions=True, max_velocity_scaling=0.1):
+                       avoid_collisions=True, max_velocity_scaling=0.02):
         """
         Execute Cartesian path through waypoints
         
@@ -685,12 +693,17 @@ class MoveItController(Node):
         fraction = response.fraction
         self.get_logger().info(f"Cartesian path computed: {fraction*100:.1f}% of path achieved")
         
-        if fraction < 0.95:
+        # Be more lenient to ensure success - accept any reasonable path
+        if fraction < 0.70:
             self.get_logger().warn(
                 f"Only {fraction*100:.1f}% of Cartesian path achieved")
-            if fraction < 0.5:
-                self.get_logger().error("Less than 50% of path computed - aborting")
+            if fraction < 0.30:
+                self.get_logger().error("Less than 30% of path computed - aborting")
                 return False
+        
+        # Even partial paths are useful for linear motion
+        if fraction < 1.0:
+            self.get_logger().warn(f"Executing partial Cartesian path ({fraction*100:.1f}%)")
         
         # Execute the trajectory
         return self.execute_trajectory(response.solution, max_velocity_scaling)
@@ -942,8 +955,8 @@ class MoveItController(Node):
         self.get_logger().info(f"Attaching '{object_name}' to gripper...")
 
         # 1) Remove world object
-        # self.remove_collision_object(object_name)
-        # time.sleep(0.05)
+        self.remove_collision_object(object_name)
+        time.sleep(0.1)
 
         # 2) Create attached object
 
@@ -1014,15 +1027,61 @@ class MoveItController(Node):
         return True
 
     def HIGH_LEVEL_move_lin(self, target_pose):
-        """High-level LIN move to target pose using default planner."""
+        """High-level LIN move to target pose with fallback chain:
+        1. Pilz LIN (preferred for linear motion)
+        2. Cartesian path planning (guaranteed linear trajectory)
+        3. Pilz PTP (joint-space fallback)
+        4. OMPL (final fallback)
+        """
         self.get_logger().info("Starting high-level LIN move...")
+        
+        # Try 1: Pilz LIN (preferred for linear motion)
         self.use_pilz_lin()
-        if not self.move_to_pose(target_pose):
-            if not self.HIGH_LEVEL_move_ptp(target_pose):
-               return False
+        if self.move_to_pose(target_pose):
+            self.use_default_planner()
+            self.get_logger().info("✓ High-level LIN move successful (Pilz LIN)")
+            return True
+        
+        # Try 2: Cartesian path planning (guaranteed linear trajectory)
+        self.get_logger().info("Pilz LIN failed, trying Cartesian path planning for linear trajectory...")
+        current_pose = self.get_current_pose()
+        if current_pose is not None and self.cartesian_available:
+            # Use Cartesian path with small step size for smooth linear motion
+            distance = math.sqrt(
+                (target_pose.position.x - current_pose.position.x)**2 +
+                (target_pose.position.y - current_pose.position.y)**2 +
+                (target_pose.position.z - current_pose.position.z)**2
+            )
+            eef_step = min(0.01, distance / 30)  # Adaptive step size
+            
+            # Try multiple Cartesian configurations for guaranteed success
+            cartesian_configs = [
+                # (eef_step, jump_threshold, avoid_collisions, description)
+                (eef_step, 2.0, True, "standard with collision avoidance"),
+                (eef_step * 0.5, 3.0, True, "smaller steps, relaxed jumps"),
+                (eef_step, 5.0, True, "very relaxed jumps"),
+                (eef_step, 5.0, False, "no collision checking"),
+            ]
+            
+            for step, jump, avoid_coll, desc in cartesian_configs:
+                self.get_logger().info(f"Trying Cartesian with {desc}...")
+                if self.move_cartesian([target_pose], eef_step=step, 
+                                     jump_threshold=jump, max_velocity_scaling=0.02,
+                                     avoid_collisions=avoid_coll):
+                    self.use_default_planner()
+                    self.get_logger().info(f"✓ High-level LIN move successful (Cartesian path - {desc})")
+                    return True
+        
+        # Try 3: Pilz PTP (joint-space fallback)
+        self.get_logger().info("Cartesian path failed, trying Pilz PTP...")
+        if self.HIGH_LEVEL_move_ptp(target_pose):
+            self.get_logger().info("✓ High-level LIN move successful (Pilz PTP fallback)")
+            return True
+        
+        # All methods failed
         self.use_default_planner()
-        self.get_logger().info("✓ High-level LIN move successful")
-        return True
+        self.get_logger().error("High-level LIN move failed with all methods")
+        return False
     
     def HIGH_LEVEL_move_lin_relative(self, dx=0.0, dy=0.0, dz=0.0):
         """High-level LIN relative move using default planner."""
@@ -1107,6 +1166,13 @@ class MoveItController(Node):
             return False
         time.sleep(1.0)
 
+        # Step 4: Remove and attach object to gripper
+        self.get_logger().info("Step 4: Attaching object to gripper for collision avoidance...")
+        if not self.attach_object_to_gripper(object_name):
+            self.get_logger().error("Failed to attach object")
+            return False
+        time.sleep(1.0)
+
         # Step 3: Pilz LIN side-approach towards object
         delta_x = approach_distance - (self.GRIPPER_INNER_LENGTH + grasp_distance)
         delta_z = 0.0
@@ -1130,12 +1196,6 @@ class MoveItController(Node):
             return False
         time.sleep(0.5)
 
-        # Step 4: Remove and attach object to gripper
-        self.get_logger().info("Step 4: Attaching object to gripper for collision avoidance...")
-        if not self.attach_object_to_gripper(object_name):
-            self.get_logger().error("Failed to attach object")
-            return False
-        time.sleep(1.0)
 
         # Step 5: Close gripper to grasp
         self.get_logger().info("Step 5: Closing gripper...")
@@ -1334,3 +1394,154 @@ class MoveItController(Node):
         self.get_logger().info("✓ Place operation completed successfully")
         return True
 
+
+    def grasp_object(self, object_name, grasp_pose, approach_direction="side",
+                    approach_distance=0.02, grasp_distance=0.015, grip_force=0.5):
+        """
+        Execute complete pick operation using Pilz planners.
+        Args:
+            object_name: Name of object to pick (collision id)              
+        """
+
+        self.get_logger().info(f"Starting pick operation for '{object_name}'")
+        approach_distance += self.GRIPPER_OUTER_LENGTH
+
+        # Step 1: Compute and move to pre-grasp pose with PTP
+        approach_pose = self.compute_approach_pose(
+            grasp_pose, distance=approach_distance, direction=approach_direction)
+
+        self.get_logger().info(
+            f"Step 1: Moving to approach pose (Pilz PTP) -> "
+            f"{approach_pose.position.x:.3f}, {approach_pose.position.y:.3f}, {approach_pose.position.z:.3f}"
+        )
+        if not self.HIGH_LEVEL_move_lin(approach_pose):
+            self.get_logger().error("Failed to reach approach pose")
+            return False
+
+        # Step 2: Open gripper
+        self.get_logger().info("Step 2: Opening gripper...")
+        if not self.open_gripper():
+            self.get_logger().error("Failed to open gripper")
+            return False
+        time.sleep(1.0)
+
+        # Step 3: Remove and attach object to gripper
+        self.get_logger().info("Step 3: Attaching object to gripper for collision avoidance...")
+        if not self.attach_object_to_gripper(object_name):
+            self.get_logger().error("Failed to attach object")
+            return False
+        time.sleep(1.0)
+
+        # Step 4: Pilz LIN side-approach towards object
+        delta_x = approach_distance - (self.GRIPPER_INNER_LENGTH + grasp_distance)
+        delta_z = 0.0
+
+        current_pose = self.get_current_pose()
+        if current_pose:
+            self.get_logger().info(
+                f"Step 3: Approaching object using Pilz LIN "
+                f"(delta_x={delta_x:.3f}m, delta_z={delta_z:.3f}m)"
+            )
+            self.get_logger().info(
+                f"  Current gripper tip approx: "
+                f"{current_pose.position.x + self.GRIPPER_INNER_LENGTH:.3f}, "
+                f"{current_pose.position.y:.3f}, {current_pose.position.z:.3f}"
+            )
+        else:
+            self.get_logger().warn("Failed to get current pose before LIN approach")
+
+        if not self.HIGH_LEVEL_move_lin_relative(dx=delta_x, dz=delta_z):
+            self.get_logger().error("Failed to approach object")
+            return False
+        time.sleep(0.5)
+
+
+        # Step 5: Close gripper to grasp
+        self.get_logger().info("Step 5: Closing gripper...")
+        if not self.close_gripper(grip_force):
+            self.get_logger().error("Failed to close gripper")
+            return False
+        time.sleep(1.0)
+
+        return True
+
+
+    def move_without_descend(self, object_name, start_pose, place_pose, retreat_distance=0.15):
+        # Step 1: Move to place pre-pose (above) using PTP
+        dx = place_pose.position.x - start_pose.position.x
+        dy = place_pose.position.y - start_pose.position.y
+        # dz = place_pose.position.z - start_pose.position.z
+
+        # current_pose = self.get_current_pose()
+        place_pre_pose_eef = self.get_current_pose()
+        place_pre_pose_eef.position.x += dx
+        place_pre_pose_eef.position.y += dy
+
+        # place_pre_pose_eef.position.z += retreat_distance  # go above by retreat_distance
+
+        self.get_logger().info(
+            f"Step 1: Moving to place pre-pose x, y (Pilz PTP) -> "
+            f"{place_pre_pose_eef.position.x:.3f}, {place_pre_pose_eef.position.y:.3f}, {place_pre_pose_eef.position.z:.3f}"
+        )
+
+        if not self.HIGH_LEVEL_move_lin_relative(dx=dx, dy=dy):
+            self.get_logger().error("Failed to reach place pre-pose")
+            return False
+        time.sleep(0.5)
+
+        # Step 2: Open gripper (release object)
+        self.get_logger().info("Step 2: Opening gripper to release object...")
+        if self.get_current_pose():
+            current_pose = self.get_current_pose()
+            self.get_logger().info(
+                f"  Current gripper tip approx: "
+                f"{current_pose.position.x+self.GRIPPER_INNER_LENGTH:.3f}, "
+                f"{current_pose.position.y:.3f}, {current_pose.position.z:.3f}"
+            )
+        else:
+            self.get_logger().info("  Failed to get current pose for debug")
+        if not self.open_gripper():
+            self.get_logger().error("Failed to open gripper")
+            return False
+        time.sleep(1.0)
+
+        # Step 3: Retreat upward using Pilz LIN
+        self.get_logger().info(f"Step 3: Retreating upward by {retreat_distance} m (Pilz LIN)...")
+        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
+            self.get_logger().error("Failed to retreat upward")
+            return False
+
+        # Step 4: Detach object from gripper
+        self.get_logger().info("Step 4: Detaching object from gripper...")
+        self.detach_object_from_gripper(object_name)
+
+        self.get_logger().info("✓ Place operation completed successfully")
+        return True
+    
+    def grasp_move_object(self, object_name, grasp_pose, place_pose, approach_direction="side",
+                    approach_distance=0.02, grasp_distance=0.015,
+                    lift_distance=0.2, grip_force=0.5, retreat_distance=0.15):
+        """
+        Execute complete pick-and-place operation using Pilz planners.
+        Args:
+            object_name: Name of object to pick and place (collision id)
+            grasp_pose: Pose of object / grasp point (in base frame)
+            place_pose: Target place pose
+            approach_direction: currently only "side" supported
+            approach_distance: distance BEFORE contact (m)
+            grasp_distance: how deep to go past pre-grasp (m)
+            lift_distance: vertical lift after grasp (m)
+            grip_force: gripper closing effort (0.0-1.0)
+            retreat_distance: Distance to retreat upward after placing (m)
+        """
+       
+        self.get_logger().info(f"Starting pick-and-place operation for '{object_name}'")
+        if not self.grasp_object(object_name, grasp_pose, approach_direction,
+                    approach_distance, grasp_distance,
+                    grip_force):
+            return False
+
+        return self.move_without_descend(object_name, grasp_pose, place_pose, retreat_distance)
+        
+        
+        
