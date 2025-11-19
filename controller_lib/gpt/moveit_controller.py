@@ -118,6 +118,7 @@ class MoveItController(Node):
         
         # Joint state subscriber for IK seed
         self.current_joint_state = None
+        self.last_joint_state_time = None
         self.joint_state_sub = self.create_subscription(
             JointState,
             '/joint_states',
@@ -159,6 +160,7 @@ class MoveItController(Node):
     def _joint_state_callback(self, msg):
         """Store current joint state for IK seed"""
         self.current_joint_state = msg
+        self.last_joint_state_time = time.time()
     
     def _get_start_state(self):
         """Get current robot state as start state for planning"""
@@ -168,6 +170,54 @@ class MoveItController(Node):
         robot_state = RobotState()
         robot_state.joint_state = self.current_joint_state
         return robot_state
+    
+    def wait_for_joint_state(self, timeout=5.0, max_age=2.0, allow_stale=False):
+        """
+        Wait for joint state to be available and recent.
+        
+        Args:
+            timeout: Maximum time to wait for joint state (seconds)
+            max_age: Maximum age of joint state to consider valid (seconds)
+            allow_stale: If True, allow stale joint state (useful for recovery scenarios)
+        
+        Returns:
+            bool: True if joint state is available and recent, False otherwise
+        """
+        if not hasattr(self, 'last_joint_state_time'):
+            self.last_joint_state_time = None
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.current_joint_state is not None:
+                if self.last_joint_state_time is not None:
+                    age = time.time() - self.last_joint_state_time
+                    if age <= max_age:
+                        self.get_logger().debug(f"Joint state available (age: {age:.2f}s)")
+                        return True
+                    elif allow_stale:
+                        # Allow stale joint state if explicitly requested (for recovery)
+                        self.get_logger().warn(f"Using stale joint state (age: {age:.2f}s) - hardware may be recovering")
+                        return True
+                    else:
+                        # Only log warning, don't spam
+                        if int((time.time() - start_time) * 10) % 5 == 0:  # Log every 0.5s
+                            self.get_logger().warn(f"Joint state too old (age: {age:.2f}s, max: {max_age}s)")
+                else:
+                    # If we have joint state but no timestamp, assume it's recent
+                    self.get_logger().debug("Joint state available (no timestamp)")
+                    return True
+            
+            # Spin to receive joint state messages
+            rclpy.spin_once(self, timeout_sec=0.1)
+            time.sleep(0.1)
+        
+        # If we have joint state but it's stale, and allow_stale is True, use it anyway
+        if allow_stale and self.current_joint_state is not None:
+            self.get_logger().warn("Timeout waiting for fresh joint state, but using stale state for recovery")
+            return True
+        
+        self.get_logger().error(f"Joint state not available after {timeout}s - hardware may be unresponsive")
+        return False
     
     # ==================== POSE UTILITIES ====================
     
@@ -190,6 +240,96 @@ class MoveItController(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to get current pose: {e}")
             return None
+    
+    def wait_for_motion_completion(self, target_pose=None, position_tolerance=0.02, 
+                                   orientation_tolerance=0.1, timeout=30.0, check_interval=0.5):
+        """
+        Wait for robot motion to actually complete by checking if current pose matches target.
+        
+        CRITICAL: This function uses TF lookups which are lightweight and don't stress the hardware.
+        However, if the hardware driver is having communication issues, this will gracefully fail.
+        
+        Args:
+            target_pose: Target pose to wait for (if None, just wait for motion to settle)
+            position_tolerance: Maximum position error to consider motion complete (m)
+            orientation_tolerance: Maximum orientation error to consider motion complete (rad)
+            timeout: Maximum time to wait (seconds)
+            check_interval: Time between pose checks (seconds) - increased to reduce load
+        
+        Returns:
+            bool: True if motion completed, False if timeout or error
+        """
+        start_time = time.time()
+        last_pose = None
+        stable_count = 0
+        required_stable_checks = 2  # Reduced from 3 to 2 for faster completion
+        consecutive_errors = 0
+        max_errors = 5  # Allow some TF lookup failures
+        
+        while time.time() - start_time < timeout:
+            try:
+                current_pose = self.get_current_pose()
+                if current_pose is None:
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_errors:
+                        self.get_logger().warn("Too many TF lookup failures, assuming motion complete")
+                        return True  # Assume complete if TF unavailable
+                    time.sleep(check_interval)
+                    continue
+                
+                consecutive_errors = 0  # Reset error count on success
+                
+                # If target pose provided, check if we're close enough
+                if target_pose is not None:
+                    pos_error = math.sqrt(
+                        (current_pose.position.x - target_pose.position.x)**2 +
+                        (current_pose.position.y - target_pose.position.y)**2 +
+                        (current_pose.position.z - target_pose.position.z)**2
+                    )
+                    
+                    # Check orientation error (quaternion distance)
+                    q1 = [current_pose.orientation.x, current_pose.orientation.y,
+                          current_pose.orientation.z, current_pose.orientation.w]
+                    q2 = [target_pose.orientation.x, target_pose.orientation.y,
+                          target_pose.orientation.z, target_pose.orientation.w]
+                    # Quaternion dot product (closer to 1 = more similar)
+                    q_dot = abs(q1[0]*q2[0] + q1[1]*q2[1] + q1[2]*q2[2] + q1[3]*q2[3])
+                    ori_error = 2 * math.acos(min(1.0, q_dot))
+                    
+                    if pos_error <= position_tolerance and ori_error <= orientation_tolerance:
+                        stable_count += 1
+                        if stable_count >= required_stable_checks:
+                            return True
+                    else:
+                        stable_count = 0
+                else:
+                    # No target pose - just check if pose is stable (not moving)
+                    if last_pose is not None:
+                        pos_change = math.sqrt(
+                            (current_pose.position.x - last_pose.position.x)**2 +
+                            (current_pose.position.y - last_pose.position.y)**2 +
+                            (current_pose.position.z - last_pose.position.z)**2
+                        )
+                        if pos_change < 0.001:  # Less than 1mm movement
+                            stable_count += 1
+                            if stable_count >= required_stable_checks:
+                                return True
+                        else:
+                            stable_count = 0
+                    last_pose = current_pose
+                
+                time.sleep(check_interval)
+            except Exception as e:
+                # If TF lookup fails, don't crash - just log and continue
+                self.get_logger().debug(f"TF lookup error in wait_for_motion_completion: {e}")
+                consecutive_errors += 1
+                if consecutive_errors >= max_errors:
+                    self.get_logger().warn("Too many errors in motion completion check, assuming complete")
+                    return True  # Assume complete to avoid blocking
+                time.sleep(check_interval)
+        
+        self.get_logger().warn(f"Motion completion timeout after {timeout}s")
+        return False
     
     def set_grasp_orientation(self, pose, orientation_name):
         """Set pose orientation using predefined orientation name"""
@@ -226,6 +366,13 @@ class MoveItController(Node):
     
     def move_to_pose(self, target_pose, planning_time=7.0, max_retries=5):
         """Move arm to target pose; auto-retry if MoveIt returns INVALID_MOTION_PLAN."""
+        # CRITICAL: Check if joint state is available before planning
+        # If hardware driver crashed, joint states won't be available
+        # Use allow_stale=True to allow recovery from temporary hardware issues
+        if not self.wait_for_joint_state(timeout=3.0, max_age=5.0, allow_stale=True):
+            self.get_logger().error("Cannot plan motion - joint state not available. Hardware driver may have crashed.")
+            return False
+        
         # Adjust parameters for Pilz planners (they need more time and attempts)
         is_pilz = (self.planning_pipeline_id == "pilz_industrial_motion_planner")
         is_pilz_lin = (is_pilz and self.planner_id == "LIN")
@@ -347,6 +494,20 @@ class MoveItController(Node):
 
             if code == MoveItErrorCodes.SUCCESS:
                 self.get_logger().info("✓ Move completed successfully")
+                # CRITICAL: Wait for actual motion completion, not just planning success
+                # MoveIt returns SUCCESS when trajectory is sent, not when robot finishes
+                # Use shorter timeout and be more lenient to avoid hardware communication issues
+                try:
+                    if not self.wait_for_motion_completion(target_pose=target_pose, timeout=15.0, check_interval=0.5):
+                        self.get_logger().debug("Move reported success but pose verification timed out (this is usually OK)")
+                except Exception as e:
+                    # Don't fail the move if pose verification has issues
+                    self.get_logger().debug(f"Pose verification had issues (non-critical): {e}")
+                
+                # CRITICAL: Add small delay after motion to allow hardware driver to recover
+                # The hardware driver may timeout during feedback refresh, so give it time
+                time.sleep(0.5)
+                
                 return True
 
             self.get_logger().warn(f"✗ Move failed with {code_str} (code {code}); retrying...")
@@ -409,6 +570,12 @@ class MoveItController(Node):
         Returns:
             bool: True if successful
         """
+        # CRITICAL: Check if joint state is available before planning
+        # Use allow_stale=True to allow recovery from temporary hardware issues
+        if not self.wait_for_joint_state(timeout=3.0, max_age=5.0, allow_stale=True):
+            self.get_logger().error("Cannot plan motion - joint state not available. Hardware driver may have crashed.")
+            return False
+        
         if len(joint_positions) != 7:
             self.get_logger().error(f"Expected 7 joint values, got {len(joint_positions)}")
             return False
@@ -800,10 +967,11 @@ class MoveItController(Node):
         
         goal = MoveGroup.Goal()
         goal.request.group_name = self.gripper_group_name
-        goal.request.num_planning_attempts = 5
-        goal.request.allowed_planning_time = 1.0
-        goal.request.max_velocity_scaling_factor = 0.5
-        goal.request.max_acceleration_scaling_factor = 0.5
+        goal.request.num_planning_attempts = 10
+        goal.request.allowed_planning_time = 2.0
+        # CRITICAL: Slow down gripper to prevent timeout - gripper needs more time
+        goal.request.max_velocity_scaling_factor = 0.2  # Reduced from 0.5 to 0.2
+        goal.request.max_acceleration_scaling_factor = 0.2  # Reduced from 0.5 to 0.2
         
         constraints = Constraints()
         
@@ -827,28 +995,46 @@ class MoveItController(Node):
             joint_constraint = JointConstraint()
             joint_constraint.joint_name = joint_name
             joint_constraint.position = positions[i]
-            joint_constraint.tolerance_above = 0.005
-            joint_constraint.tolerance_below = 0.005
+            # CRITICAL: Increase tolerance to make it easier to reach goal and prevent timeout
+            joint_constraint.tolerance_above = 0.01  # Increased from 0.005
+            joint_constraint.tolerance_below = 0.01  # Increased from 0.005
             joint_constraint.weight = 1.0
             constraints.joint_constraints.append(joint_constraint)
         
         goal.request.goal_constraints.append(constraints)
         
         future = gripper_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         
-        goal_handle = future.result()
-        if not goal_handle.accepted:
+        if not future.done():
+            self.get_logger().error("Gripper goal send timed out")
             gripper_client.destroy()
             return False
         
+        goal_handle = future.result()
+        if not goal_handle or not goal_handle.accepted:
+            self.get_logger().error("Gripper goal rejected")
+            gripper_client.destroy()
+            return False
+        
+        # CRITICAL: Increase timeout for gripper execution - grippers can take 10+ seconds
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=15.0)
+        
+        if not result_future.done():
+            self.get_logger().error("Gripper execution timed out after 15 seconds")
+            gripper_client.destroy()
+            return False
         
         result = result_future.result()
         gripper_client.destroy()
         
-        return result.result.error_code.val == MoveItErrorCodes.SUCCESS
+        error_code = result.result.error_code.val
+        if error_code == MoveItErrorCodes.SUCCESS:
+            return True
+        else:
+            self.get_logger().error(f"Gripper operation failed with error code: {error_code}")
+            return False
     
     def open_gripper(self, openness=0.0):
         """Open gripper"""
@@ -1111,14 +1297,41 @@ class MoveItController(Node):
         pour_angle_rad = math.radians(pour_angle_degree)
         self.get_logger().info(f"Starting pouring motion by {pour_angle_rad:.2f} rad...")
 
+        # Get current pose before rotation
+        start_pose = self.get_current_pose()
+        if start_pose is None:
+            self.get_logger().error("Cannot get current pose for pouring")
+            return False
+
         # Rotate end-effector around Y-axis
         if not self.rotate_eef_relative(yaw=pour_angle_rad):
             self.get_logger().error("Pouring motion failed")
             return False
         
+        # CRITICAL: Wait for pouring rotation to complete
+        self.get_logger().info("Waiting for pouring rotation to complete...")
+        time.sleep(2.0)  # Extra wait for pouring motion
+        try:
+            if not self.wait_for_motion_completion(timeout=15.0, check_interval=0.5):
+                self.get_logger().debug("Pouring rotation verification timed out (usually OK)")
+        except Exception as e:
+            self.get_logger().debug(f"Pouring rotation verification had issues (non-critical): {e}")
+        
+        # Hold pour position briefly
+        time.sleep(3.0)  # Hold pour for 3 seconds
+        
         if not self.rotate_eef_relative(yaw=-pour_angle_rad):
             self.get_logger().error("Returning from pouring motion failed")
             return False
+        
+        # CRITICAL: Wait for return rotation to complete
+        self.get_logger().info("Waiting for return rotation to complete...")
+        time.sleep(2.0)  # Extra wait for return motion
+        try:
+            if not self.wait_for_motion_completion(target_pose=start_pose, timeout=15.0, check_interval=0.5):
+                self.get_logger().debug("Return rotation verification timed out (usually OK)")
+        except Exception as e:
+            self.get_logger().debug(f"Return rotation verification had issues (non-critical): {e}")
 
         self.get_logger().info("✓ Pouring motion completed successfully")
         return True
@@ -1164,7 +1377,7 @@ class MoveItController(Node):
         if not self.open_gripper():
             self.get_logger().error("Failed to open gripper")
             return False
-        time.sleep(1.0)
+        time.sleep(2.0)  # Increased wait for gripper to fully open
 
         # Step 4: Remove and attach object to gripper
         self.get_logger().info("Step 4: Attaching object to gripper for collision avoidance...")
@@ -1202,7 +1415,7 @@ class MoveItController(Node):
         if not self.close_gripper(grip_force):
             self.get_logger().error("Failed to close gripper")
             return False
-        time.sleep(1.0)
+        time.sleep(2.0)  # Increased wait for gripper to fully close and grasp
 
         # Step 6: Lift vertically using Pilz LIN
         self.get_logger().info(f"Step 6: Lifting object using Pilz LIN ({lift_distance} m)...")
@@ -1283,7 +1496,7 @@ class MoveItController(Node):
         if not self.open_gripper():
             self.get_logger().error("Failed to open gripper")
             return False
-        time.sleep(1.0)
+        time.sleep(2.5)  # Increased wait for gripper to fully open and release object
 
         # Step 4: Retreat upward using Pilz LIN
         self.get_logger().info(f"Step 4: Retreating upward by {retreat_distance} m (Pilz LIN)...")
@@ -1355,6 +1568,10 @@ class MoveItController(Node):
             self.get_logger().error("Pouring motion failed")
             return False
         
+        # CRITICAL: Wait after pouring before descending
+        self.get_logger().info("Waiting after pouring motion...")
+        time.sleep(1.0)
+        
         #Step 3: Descend with Pilz LIN to place pose
         dz = place_pose.position.z - self.get_current_pose().position.z
         self.get_logger().info(
@@ -1379,7 +1596,7 @@ class MoveItController(Node):
         if not self.open_gripper():
             self.get_logger().error("Failed to open gripper")
             return False
-        time.sleep(1.0)
+        time.sleep(2.5)  # Increased wait for gripper to fully open and release object
 
         # Step 5: Retreat upward using Pilz LIN
         self.get_logger().info(f"Step 5: Retreating upward by {retreat_distance} m (Pilz LIN)...")
@@ -1423,7 +1640,7 @@ class MoveItController(Node):
         if not self.open_gripper():
             self.get_logger().error("Failed to open gripper")
             return False
-        time.sleep(1.0)
+        time.sleep(2.0)  # Increased wait for gripper to fully open
 
         # Step 3: Remove and attach object to gripper
         self.get_logger().info("Step 3: Attaching object to gripper for collision avoidance...")
@@ -1461,7 +1678,7 @@ class MoveItController(Node):
         if not self.close_gripper(grip_force):
             self.get_logger().error("Failed to close gripper")
             return False
-        time.sleep(1.0)
+        time.sleep(2.0)  # Increased wait for gripper to fully close and grasp
 
         return True
 
@@ -1503,7 +1720,7 @@ class MoveItController(Node):
         if not self.open_gripper():
             self.get_logger().error("Failed to open gripper")
             return False
-        time.sleep(1.0)
+        time.sleep(2.5)  # Increased wait for gripper to fully open and release object
 
         # Step 3: Retreat upward using Pilz LIN
         self.get_logger().info(f"Step 3: Retreating upward by {retreat_distance} m (Pilz LIN)...")

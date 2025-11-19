@@ -35,12 +35,12 @@ class RealDetectionPickPlaceController(MoveItController):
 
         # Workspace table parameters
         self.workspace_table = {
-            'dx': 0.38,
-            'dy': -0.28,
+            'dx': 0.43,
+            'dy': -0.31,
             'dz': -0.37,
             'width': 0.55,
             'depth': 0.55,
-            'height': 0.625
+            'height': 0.63
         }
 
         self.serving_area = [(self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475, self.workspace_table['dz']+self.workspace_table['height']),
@@ -119,6 +119,7 @@ class RealDetectionPickPlaceController(MoveItController):
         # Update poses ONLY for currently visible objects that aren't picked
         for i, marker_id in enumerate(self.marker_ids):
             if marker_id in self.detected_objects:
+                msg.poses[i].position.y -= 0.05
                 self.detected_objects[marker_id]['pose'] = msg.poses[i]
                 # Only update collision if object is NOT picked and NOT moving
                 if marker_id not in self.picked_objects:
@@ -244,18 +245,20 @@ class RealDetectionPickPlaceController(MoveItController):
         
         object_pose = obj_data['pose']
         object_name = f"detected_object_{marker_id}"
+        if marker_id == 7: 
+            grip_force = 25/44.0
 
         self.move_to_home_position()
         # ==================== PICK PHASE ====================
         # approach_distance = 0.0  # Meters from the gripper to the object before pick
-        grasp_distance = 0.02  # Meters from the gripper to the object after pick
+        grasp_distance = 0.04  # Meters from the gripper to the object after pick
         # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
 
         self.get_logger().info(
             f"Target place pose: x={place_pose.position.x:.3f}, "
             f"y={place_pose.position.y:.3f}, z={place_pose.position.z:.3f}")
         
-        move_success = self.grasp_move_object(object_name, object_pose, place_pose, grasp_distance=grasp_distance)
+        move_success = self.grasp_move_object(object_name, object_pose, place_pose, grasp_distance=grasp_distance, grip_force=grip_force if marker_id ==7 else 1.0)
         if not move_success:
             self.get_logger().error("✗ Move operation failed!")
             self.is_moving = False
@@ -320,7 +323,7 @@ class RealDetectionPickPlaceController(MoveItController):
         
         # ==================== PICK PHASE ====================
         # approach_distance = 0.0  # Meters from the gripper to the object before pick
-        grasp_distance = 0.02  # Meters from the gripper to the object after pick
+        grasp_distance = 0.04  # Meters from the gripper to the object after pick
         self.get_logger().info("\n--- PICK PHASE ---")
         # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
         pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance)
@@ -413,6 +416,8 @@ class RealDetectionPickPlaceController(MoveItController):
         
         object_pose = obj_data['pose']
         object_name = f"detected_object_{marker_id}"
+        if marker_id == 6:
+            grip_force = 20/44.0
 
         self.move_to_home_position()
         
@@ -421,7 +426,7 @@ class RealDetectionPickPlaceController(MoveItController):
         grasp_distance = 0.02  # Meters from the gripper to the object after pick
         self.get_logger().info("===================== PICK PHASE ====================")
         # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
-        pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance)
+        pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance, grip_force=grip_force)
  
         if not pick_success:
             self.get_logger().error("✗ Pick operation failed!")
@@ -573,7 +578,7 @@ class RealDetectionPickPlaceController(MoveItController):
             width=chair_back_width, depth=chair_back_depth, height=chair_back_height)
         
         # Big table
-        self.add_real_object("big_table",dx=0.18, dy=-0.49, dz=-0.37, width=0.765, depth=-1, height=0.715)
+        self.add_real_object("big_table",dx=0.26, dy=-0.51, dz=-0.37, width=0.765, depth=-1, height=0.715)
 
         # Workspace table
         self.add_real_object("workspace_table", dx=self.workspace_table['dx'], dy=self.workspace_table['dy'], dz=self.workspace_table['dz'], width=self.workspace_table['width'], depth=self.workspace_table['depth'], height=self.workspace_table['height'])
@@ -609,7 +614,9 @@ class RealDetectionPickPlaceController(MoveItController):
             return False
         
         self.get_logger().info("Water bottle placed successfully, preparing to pick medicine bottle...")
-        time.sleep(1)  # Wait a moment before next operation
+        # CRITICAL: Wait longer to ensure robot has fully completed all motions
+        # including pouring, retreating, and settling
+        time.sleep(5.0)  # Increased wait to ensure full completion
 
         #============PICK AND PLACE MEDICINE BOTTLE=================
         if 7 not in self.detected_objects:
