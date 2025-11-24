@@ -27,8 +27,21 @@ import json
 
 
 OBJECT_MAP = {
-    6: "water_bottle",
-    7: "medicine_bottle"
+    1: 'water_cup',
+    5: 'water_bottle',
+    6: 'water_bottle',
+    7: 'medicine_bottle1',
+    8: 'medicine_bottle2',
+    10: 'plate',
+    11: 'bowl',
+    12: 'fork',
+    13: 'spoon',
+    14: 'cereal_box',
+    15: 'milk_carton',
+    16: 'milk_bottle',
+    20: 'bookshelf',
+    21: 'book_1',
+    22: 'book_2'
 }
 
 

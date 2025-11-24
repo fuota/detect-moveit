@@ -130,12 +130,22 @@ OBJECT_MAP_EXTENDED = {
         'handle_params': (0.03, 0.1),  # handle_radius, handle_height
         'total_height': 0.12,
     },
+
+    16: {
+        'name': 'milk_bottle',
+        'type': 'mesh',
+        'aruco_offset': (0.029, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'milk_bottle.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.029, 0.093),  # handle_radius, handle_height
+        'total_height': 0.12,
+    },
     
     20: {
         'name': 'bookshelf',
         'type': 'mesh',
         'is_static': True,  # Static object - only add once, don't update
-        'aruco_offset': (-0.065, -0.04875, 0.0),  # TODO: Measure actual offset
+        'aruco_offset': (0.07, 0.0, 0.0),  # TODO: Measure actual offset
         'mesh_file': 'shelf.stl',
         'mesh_scale': 0.001,
         'bookshelf_params': (0.05, 0.195, 0.14)  # shelf_height, shelf_depth, shelf_width (for compartment calculations)
@@ -1372,8 +1382,8 @@ class RealDetectionPickPlaceController(MoveItController):
         
         # Calculate compartment positions
         # X: Center of back board (same for all compartments)
-        x_pos = aruco_pose.position.x + back_divider_thickness - shelf_width 
-        y_pos = aruco_pose.position.y - (shelf_depth / 2.0)*compartment_index
+        x_pos = aruco_pose.position.x 
+        y_pos = aruco_pose.position.y + (shelf_depth / 4.0) if compartment_index == 0 else aruco_pose.position.y - shelf_depth/4.0
         z_pos = aruco_pose.position.z - shelf_height / 2.0 + base_thickness
          
         return (x_pos, y_pos, z_pos)

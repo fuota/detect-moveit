@@ -73,68 +73,68 @@ simulated_objects:
 #     qw: 1.0
 
 #-----------SET UP TABLEWARE OBJECTS --------
-- id: 11  # bowl 
-  pose:
-    x: 0.8
-    y: -0.05
-    z: 0.3265  
-    qx: 0.0
-    qy: 0.0
-    qz: 0.0
-    qw: 1.0
+# - id: 11  # bowl 
+#   pose:
+#     x: 0.8
+#     y: -0.05
+#     z: 0.3265  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
 
 
-- id: 12  # fork 
-  pose:
-    x: 0.74
-    y: 0.17
-    z: 0.31  
-    qx: 0.0
-    qy: 0.0
-    qz: 0.0
-    qw: 1.0
+# - id: 12  # fork 
+#   pose:
+#     x: 0.74
+#     y: 0.17
+#     z: 0.31  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
 
-- id: 13  # spoon 
-  pose:
-    x: 0.78
-    y: -0.19
-    z: 0.31  
-    qx: 0.0
-    qy: 0.0
-    qz: 0.0
-    qw: 1.0  
+# - id: 13  # spoon 
+#   pose:
+#     x: 0.78
+#     y: -0.19
+#     z: 0.31  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0  
 
 #-------- ORGANIZE BOOKS OBJECTS --------
 
-# - id: 20  # bookshelf (static)
-#   pose:
-#     x: 0.91
-#     y: 0.01
-#     z: 0.285  
-#     qx: 0.0
-#     qy: 0.0
-#     qz: 0.0
-#     qw: 1.0
+- id: 20  # bookshelf (static)
+  pose:
+    x: 0.75
+    y: 0.00
+    z: 0.285  
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
 
-# - id: 21  # book 1 (static)
-#   pose:
-#     x: 0.7
-#     y: 0.171
-#     z: 0.335  
-#     qx: 0.0
-#     qy: 0.0
-#     qz: 0.0
-#     qw: 1.0
+- id: 21  # book 1 (static)
+  pose:
+    x: 0.7
+    y: 0.171
+    z: 0.335  
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
 
-# - id: 22  # book 2 (static)
-#   pose:
-#     x: 0.68
-#     y: -0.2
-#     z: 0.335 # 0.26 + 0.15 = center height of 30cm shelf
-#     qx: 0.0
-#     qy: 0.0
-#     qz: 0.0
-#     qw: 1.0
+- id: 22  # book 2 (static)
+  pose:
+    x: 0.68
+    y: -0.2
+    z: 0.335 # 0.26 + 0.15 = center height of 30cm shelf
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
 
 
 
@@ -151,6 +151,7 @@ object_names:
   13: "spoon"
   14: "cereal_box"
   15: "milk_carton"
+  16: "milk_bottle"
   20: "bookshelf"
   21: "book_1"
   22: "book_2"
