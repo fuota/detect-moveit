@@ -1254,6 +1254,29 @@ class RealDetectionPickPlaceController(MoveItController):
         pose.orientation.w = 1.0
         return pose
 
+    def get_setup_table_serving_area(self, index):
+        x_pos = self.workspace_table['dx'] + 0.15
+        y_pos = self.workspace_table['dy'] + (0.55/3.0)*(3-index-1) + 0.55/6.0
+        z_pos = self.workspace_table['dz'] + self.workspace_table['height']
+        return (x_pos, y_pos, z_pos)
+    
+    def get_setup_table_serving_area_pose(self, marker_id, index):
+        serving_area_position = self.get_setup_table_serving_area(index)
+        object_data = OBJECT_MAP_EXTENDED.get(marker_id)
+        if object_data.get('type') == 'cylinder':
+            gripper_z = object_data.get('cylinder_params')[1] / 2.0
+        elif object_data.get('type') == 'mesh':
+            gripper_z = object_data.get('handle_params')[1] / 2.0
+        else:
+            gripper_z = 0.0
+        
+        pose = Pose()
+        pose.position.x = serving_area_position[0]
+        pose.position.y = serving_area_position[1]
+        pose.position.z = serving_area_position[2] + gripper_z
+        pose.orientation.w = 1.0
+        return pose
+
     def prepare_medicine(self):
         """Prepare medicine by picking and placing the medicine bottle"""
 
@@ -1355,7 +1378,32 @@ class RealDetectionPickPlaceController(MoveItController):
         self.get_logger().info("✓ Book organization completed!")
         return True
 
+    def set_up_tableware(self):
+        """Set up tableware by picking and placing the tableware in the serving area"""
+        self.get_logger().info("Starting tableware setup...")
 
+        #============PICK AND PLACE BOWL (marker 11)=================
+        if not self.execute_pick_and_place_sequence(11, self.get_setup_table_serving_area_pose(11, 1)):
+            self.get_logger().error("Failed to set up tableware - bowl pick and place failed")
+            return False
+        
+        time.sleep(3.0)
+
+        #============PICK AND PLACE FORK (marker 12)=================
+        if not self.execute_pick_and_place_sequence(12, self.get_setup_table_serving_area_pose(12, 0)):
+            self.get_logger().error("Failed to set up tableware - fork pick and place failed")
+            return False
+        
+        time.sleep(3.0)
+        
+        #============PICK AND PLACE SPOON (marker 13)=================
+        if not self.execute_pick_and_place_sequence(13, self.get_setup_table_serving_area_pose(13, 2)):
+            self.get_logger().error("Failed to set up tableware - spoon pick and place failed")
+            return False
+        
+        time.sleep(3.0)
+        self.get_logger().info("✓ Tableware setup completed!")
+        return True
 
 def main(args=None):
     rclpy.init(args=args)
@@ -1368,9 +1416,10 @@ def main(args=None):
     # Wait for valid pose before executing
     if controller.wait_for_valid_pose(timeout=15.0):
         controller.display_detected_objects()
-        controller.organize_books()
-        
-        # controller.prepare_medicine()        
+        controller.set_up_tableware()
+        # controller.prepare_medicine() 
+        # controller.organize_books()
+       
     else:
         controller.get_logger().error("Failed to receive valid pose - aborting")
     
