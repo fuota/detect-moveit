@@ -8,7 +8,7 @@ import rclpy
 from geometry_msgs.msg import Pose, PoseArray
 from std_msgs.msg import Int32MultiArray, String
 from moveit_msgs.msg import CollisionObject
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, Empty
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 import time
@@ -203,6 +203,49 @@ class RealDetectionPickPlaceController(MoveItController):
         # Create callback group for service
         self.callback_group = ReentrantCallbackGroup()
         
+        # Task definitions for UI (what steps to expect)
+        self.task_definitions = {
+            'prepare_medicine': {
+                'name': 'Prepare Medicine',
+                'description': 'Places water cup, plate, and pours water and medicine',
+                'total_steps': 4,
+                'steps': [
+                    {'step': 1, 'description': 'Place water cup in serving area'},
+                    {'step': 2, 'description': 'Place plate in serving area'},
+                    {'step': 3, 'description': 'Pour water into cup'},
+                    {'step': 4, 'description': 'Pour medicine into plate'}
+                ],
+                'estimated_duration_seconds': 120
+            },
+            'setup_tableware': {
+                'name': 'Setup Tableware',
+                'description': 'Places bowl, fork, and spoon in serving areas',
+                'total_steps': 3,
+                'steps': [
+                    {'step': 1, 'description': 'Place bowl in serving area'},
+                    {'step': 2, 'description': 'Place fork in serving area'},
+                    {'step': 3, 'description': 'Place spoon in serving area'}
+                ],
+                'estimated_duration_seconds': 90
+            },
+            'organize_books': {
+                'name': 'Organize Books',
+                'description': 'Places books in bookshelf compartments',
+                'total_steps': 2,
+                'steps': [
+                    {'step': 1, 'description': 'Place book 1 in compartment 1'},
+                    {'step': 2, 'description': 'Place book 2 in compartment 2'}
+                ],
+                'estimated_duration_seconds': 60
+            }
+        }
+        
+        # Create publisher for task progress (for UI updates)
+        self.task_progress_pub = self.create_publisher(
+            String,
+            '/task_progress',
+            10)
+        
         # Subscribe to ArUco detection topics
         self.pose_sub = self.create_subscription(
             PoseArray,
@@ -243,13 +286,50 @@ class RealDetectionPickPlaceController(MoveItController):
             callback_group=self.callback_group
         )
         
+        # Create service to get available tasks info
+        self.get_available_tasks_service = self.create_service(
+            Trigger,
+            'get_available_tasks',
+            self.get_available_tasks_callback,
+            callback_group=self.callback_group
+        )
+        
         self.get_logger().info("Services available:")
         self.get_logger().info("  - /prepare_medicine")
         self.get_logger().info("  - /setup_tableware")
         self.get_logger().info("  - /organize_books")
+        self.get_logger().info("  - /get_available_tasks (returns task info)")
+        self.get_logger().info("Progress topic:")
+        self.get_logger().info("  - /task_progress (std_msgs/String)")
         
         self.get_logger().info("=== Real Detection Pick & Place Controller Started ===")
         self.get_logger().info("Waiting for ArUco detections...")
+    
+    # ==================== PROGRESS TRACKING ====================
+    
+    def publish_task_progress(self, task_name, current_step, total_steps, step_description, status="in_progress"):
+        """
+        Publish task progress for UI updates
+        
+        Args:
+            task_name: Name of the task (e.g., "prepare_medicine")
+            current_step: Current step number (1-indexed)
+            total_steps: Total number of steps
+            step_description: Description of current step
+            status: "in_progress", "completed", "failed"
+        """
+        progress_msg = String()
+        progress_data = {
+            "task": task_name,
+            "current_step": current_step,
+            "total_steps": total_steps,
+            "description": step_description,
+            "status": status,
+            "progress_percent": int((current_step / total_steps) * 100) if total_steps > 0 else 0
+        }
+        progress_msg.data = json.dumps(progress_data)
+        self.task_progress_pub.publish(progress_msg)
+        self.get_logger().info(f"[{task_name}] Step {current_step}/{total_steps}: {step_description} ({status})")
     
     # ==================== SERVICE CALLBACKS ====================
 
@@ -293,7 +373,29 @@ class RealDetectionPickPlaceController(MoveItController):
         else:
             response.message = "Book organization failed"
         
-        return response 
+        return response
+    
+    def get_available_tasks_callback(self, request, response):
+        """Service callback to return all available tasks and their details"""
+        self.get_logger().info("Received request for available tasks info")
+        
+        try:
+            # Create response with all task information
+            tasks_info = {
+                'tasks': self.task_definitions,
+                'timestamp': time.time()
+            }
+            
+            response.success = True
+            response.message = json.dumps(tasks_info, indent=2)
+            self.get_logger().info(f"Returning info for {len(self.task_definitions)} tasks")
+        except Exception as e:
+            response.success = False
+            response.message = f"Failed to get tasks info: {str(e)}"
+            self.get_logger().error(f"Error getting tasks info: {str(e)}")
+        
+        return response
+    
     # ==================== ARUCO DETECTION CALLBACKS ====================
     
     def pose_callback(self, msg: PoseArray):
@@ -1328,28 +1430,38 @@ class RealDetectionPickPlaceController(MoveItController):
         """Prepare medicine by picking and placing the medicine bottle"""
 
         self.get_logger().info("Starting medicine preparation...")
+        task_name = "prepare_medicine"
+        total_steps = 4
 
-        #============PICK AND PLACE WATER CUP (marker 1)=================
+        #============STEP 1: PICK AND PLACE WATER CUP (marker 1)=================
+        self.publish_task_progress(task_name, 1, total_steps, "Placing water cup", "in_progress")
         if not self.execute_pick_and_place_sequence(1, self.convert_serving_area_to_pose(1, self.serving_area[1])):
             self.get_logger().error(f"Failed to prepare water cup - pick and place failed")
+            self.publish_task_progress(task_name, 1, total_steps, "Placing water cup", "failed")
             return False
         
         self.get_logger().info(f"Water cup placed successfully, preparing to pick plate...")
+        self.publish_task_progress(task_name, 1, total_steps, "Water cup placed", "completed")
         # Wait to ensure robot has fully completed all motions
         time.sleep(3.0)
         
-        #============PICK AND PLACE PLATE (marker 10)=================
+        #============STEP 2: PICK AND PLACE PLATE (marker 10)=================
+        self.publish_task_progress(task_name, 2, total_steps, "Placing plate", "in_progress")
         if not self.execute_pick_and_place_sequence(10, self.convert_serving_area_to_pose(10, self.serving_area[2])):
             self.get_logger().error(f"Failed to prepare plate - pick and place failed")
+            self.publish_task_progress(task_name, 2, total_steps, "Placing plate", "failed")
             return False
         self.get_logger().info(f"Plate placed successfully, preparing to pick water bottle...")
+        self.publish_task_progress(task_name, 2, total_steps, "Plate placed", "completed")
         time.sleep(3.0)
 
-        #============PICK, POUR INTO CUP, AND RETURN WATER BOTTLE=================
+        #============STEP 3: PICK, POUR INTO CUP, AND RETURN WATER BOTTLE=================
+        self.publish_task_progress(task_name, 3, total_steps, "Pouring water into cup", "in_progress")
         # Get water cup position (target for pouring)
         water_cup_pose = self.detected_objects[1]['pose']
         if not water_cup_pose:
             self.get_logger().error("Water cup pose not available!")
+            self.publish_task_progress(task_name, 3, total_steps, "Pouring water into cup", "failed")
             return False
         
         # Create target pose for pouring (use cup's position)
@@ -1361,15 +1473,19 @@ class RealDetectionPickPlaceController(MoveItController):
         
         if not self.execute_pick_pour_return_sequence(5, water_cup_target_pose, pour_angle_degree=45, offset_left=0.1):
             self.get_logger().error(f"Failed to pour water bottle into cup")
+            self.publish_task_progress(task_name, 3, total_steps, "Pouring water into cup", "failed")
             return False
         self.get_logger().info(f"Water bottle poured into cup and returned successfully, preparing to pour medicine bottle...")
+        self.publish_task_progress(task_name, 3, total_steps, "Water poured into cup", "completed")
         time.sleep(3.0)
         
-        #============PICK, POUR INTO PLATE, AND RETURN MEDICINE BOTTLE=================
+        #============STEP 4: PICK, POUR INTO PLATE, AND RETURN MEDICINE BOTTLE=================
+        self.publish_task_progress(task_name, 4, total_steps, "Pouring medicine into plate", "in_progress")
         # Get plate position (target for pouring)
         plate_pose = self.detected_objects[10]['pose']
         if not plate_pose:
             self.get_logger().error("Plate pose not available!")
+            self.publish_task_progress(task_name, 4, total_steps, "Pouring medicine into plate", "failed")
             return False
         
         # Create target pose for pouring (use plate's position)
@@ -1381,23 +1497,28 @@ class RealDetectionPickPlaceController(MoveItController):
         
         if not self.execute_pick_pour_return_sequence(8, plate_target_pose, pour_angle_degree=-45, offset_left=-0.1):
             self.get_logger().error(f"Failed to pour medicine bottle into plate")
+            self.publish_task_progress(task_name, 4, total_steps, "Pouring medicine into plate", "failed")
             return False
         self.get_logger().info(f"Medicine bottle poured into plate and returned successfully, medicine preparation completed!")
+        self.publish_task_progress(task_name, 4, total_steps, "Medicine preparation completed", "completed")
         return True
 
     def organize_books(self):
         """Organize books by picking and placing them in bookshelf compartments"""
+        
+        task_name = "organize_books"
+        total_steps = 2
 
         if 20 not in self.detected_objects:
             self.get_logger().error("Bookshelf (marker 20) not detected!")
+            self.publish_task_progress(task_name, 0, total_steps, "Bookshelf not detected", "failed")
             return False
 
-        
         self.get_logger().info("Starting book organization...")
         
-        # Get bookshelf compartment position (left compartment)
+        #============STEP 1: PLACE BOOK 1 (marker 21)=================
+        self.publish_task_progress(task_name, 1, total_steps, "Placing book 1 in compartment 1", "in_progress")
         compartment1_place_pose = self.get_bookshelf_compartment_pose(21, compartment_index=0)
-        compartment2_place_pose = self.get_bookshelf_compartment_pose(22, compartment_index=1)
 
         self.get_logger().info(
             f"Placing book in bookshelf compartment 1 at: "
@@ -1407,10 +1528,16 @@ class RealDetectionPickPlaceController(MoveItController):
         
         if not self.execute_pick_and_place_sequence(21, place_pose=compartment1_place_pose):
             self.get_logger().error("Failed to organize books - book pick and place failed")
+            self.publish_task_progress(task_name, 1, total_steps, "Placing book 1", "failed")
             return False
 
+        self.publish_task_progress(task_name, 1, total_steps, "Book 1 placed in compartment 1", "completed")
         time.sleep(3.0)
 
+        #============STEP 2: PLACE BOOK 2 (marker 22)=================
+        self.publish_task_progress(task_name, 2, total_steps, "Placing book 2 in compartment 2", "in_progress")
+        compartment2_place_pose = self.get_bookshelf_compartment_pose(22, compartment_index=1)
+        
         self.get_logger().info(
             f"Placing book in bookshelf compartment 2 at: "
             f"x={compartment2_place_pose.position.x:.3f}, "
@@ -1419,37 +1546,51 @@ class RealDetectionPickPlaceController(MoveItController):
         
         if not self.execute_pick_and_place_sequence(22, place_pose=compartment2_place_pose):
             self.get_logger().error("Failed to organize books - book pick and place failed")
+            self.publish_task_progress(task_name, 2, total_steps, "Placing book 2", "failed")
             return False
+        
         time.sleep(3.0)
         self.get_logger().info("✓ Book placed in bookshelf successfully!")
         self.get_logger().info("✓ Book organization completed!")
+        self.publish_task_progress(task_name, 2, total_steps, "Book organization completed", "completed")
         return True
 
     def set_up_tableware(self):
         """Set up tableware by picking and placing the tableware in the serving area"""
         self.get_logger().info("Starting tableware setup...")
+        task_name = "setup_tableware"
+        total_steps = 3
 
-        #============PICK AND PLACE BOWL (marker 11)=================
+        #============STEP 1: PICK AND PLACE BOWL (marker 11)=================
+        self.publish_task_progress(task_name, 1, total_steps, "Placing bowl", "in_progress")
         if not self.execute_pick_and_place_sequence(11, self.get_setup_table_serving_area_pose(11, 1)):
             self.get_logger().error("Failed to set up tableware - bowl pick and place failed")
+            self.publish_task_progress(task_name, 1, total_steps, "Placing bowl", "failed")
             return False
         
+        self.publish_task_progress(task_name, 1, total_steps, "Bowl placed", "completed")
         time.sleep(3.0)
 
-        #============PICK AND PLACE FORK (marker 12)=================
+        #============STEP 2: PICK AND PLACE FORK (marker 12)=================
+        self.publish_task_progress(task_name, 2, total_steps, "Placing fork", "in_progress")
         if not self.execute_pick_and_place_sequence(12, self.get_setup_table_serving_area_pose(12, 0)):
             self.get_logger().error("Failed to set up tableware - fork pick and place failed")
+            self.publish_task_progress(task_name, 2, total_steps, "Placing fork", "failed")
             return False
         
+        self.publish_task_progress(task_name, 2, total_steps, "Fork placed", "completed")
         time.sleep(3.0)
         
-        #============PICK AND PLACE SPOON (marker 13)=================
+        #============STEP 3: PICK AND PLACE SPOON (marker 13)=================
+        self.publish_task_progress(task_name, 3, total_steps, "Placing spoon", "in_progress")
         if not self.execute_pick_and_place_sequence(13, self.get_setup_table_serving_area_pose(13, 2)):
             self.get_logger().error("Failed to set up tableware - spoon pick and place failed")
+            self.publish_task_progress(task_name, 3, total_steps, "Placing spoon", "failed")
             return False
         
         time.sleep(3.0)
         self.get_logger().info("✓ Tableware setup completed!")
+        self.publish_task_progress(task_name, 3, total_steps, "Tableware setup completed", "completed")
         return True
 
 def main(args=None):
