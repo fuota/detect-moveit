@@ -78,7 +78,7 @@ class SimulatedDetectionPublisher(Node):
             name = self.object_map.get(obj_id, f"marker_{obj_id}")
             pose = obj['pose']
             self.get_logger().info(
-                f"  [{obj_id}] {name} at ({pose['x']:.3f}, {pose['y']:.3f}, {pose['z']:.3f})")
+                f"  [{obj_id}] {name} at ({float(pose['x']):.3f}, {float(pose['y']):.3f}, {float(pose['z']):.3f})")
 
     def load_config_from_yaml(self, config_file):
         """Load configuration from YAML file"""

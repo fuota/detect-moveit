@@ -12,38 +12,134 @@ marker_size: 0.025
 #   - id: ArUco marker ID (6 = water_bottle, 7 = medicine_bottle)
 #   - pose: Position (x, y, z) and orientation (qx, qy, qz, qw) in base_link frame
 simulated_objects:
-  - id: 6  # water_bottle
-    pose:
-      x: 0.8
-      y: -0.2
-      z: 0.38
-      qx: 0.0
-      qy: 0.0
-      qz: 0.0
-      qw: 1.0
+- id: 1  # water cup
+  pose:
+    x: 0.7
+    y: 0.05
+    z: 0.3085  
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
 
-  - id: 7  # medicine_bottle
-    pose:
-      x: 0.75
-      y: -0.02
-      z: 0.36
-      qx: 0.0
-      qy: 0.0
-      qz: 0.0
-      qw: 1.0
-  
-  # Add more objects by uncommenting and editing:
-  # - id: 7  # medicine_bottle
-  #   pose:
-  #     x: 0.7
-  #     y: -0.3
-  #     z: 0.625
-  #     qx: 0.0
-  #     qy: 0.0
-  #     qz: 0.0
-  #     qw: 1.0
+- id: 5  # water bottle 1
+  pose:
+    x: 0.85
+    y: 0.18
+    z: 0.3297  
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
 
-# Object name mapping (should match real detection)
+# - id: 6  # water bottle 2
+#   pose:
+#     x: 0.75
+#     y: 0.18
+#     z: 0.35  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+# - id: 7  # medicine bottle 1
+#   pose:
+#     x: 0.80
+#     y: -0.2
+#     z: 0.33 
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+- id: 8  # medicine bottle 2
+  pose:
+    x: 0.88
+    y: -0.26
+    z: 0.3055 
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
+
+# - id: 10  # plate
+#   pose:
+#     x: 0.82
+#     y: -0.127
+#     z: 0.315
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+
+# - id: 2  # bookshelf (static)
+#   pose:
+#     x: 0.7
+#     y: -0.11
+#     z: 0.285  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+
+# - id: 2  # bookshelf (static)
+#   pose:
+#     x: 0.7
+#     y: -0.11
+#     z: 0.285  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+
+# - id: 2  # bookshelf (static)
+#   pose:
+#     x: 0.7
+#     y: -0.11
+#     z: 0.285  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+# - id: 2  # bookshelf (static)
+#   pose:
+#     x: 0.7
+#     y: -0.11
+#     z: 0.285  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+# - id: 2  # bookshelf (static)
+#   pose:
+#     x: 0.7
+#     y: -0.11
+#     z: 0.285  # 0.26 + 0.15 = center height of 30cm shelf
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
+
+
+
+# Object name mapping (should match real detection - OBJECT_MAP_EXTENDED)
 object_names:
+  1: "water_cup"
+  5: "water_bottle"
   6: "water_bottle"
-  7: "medicine_bottle"
+  7: "medicine_bottle1"
+  8: "medicine_bottle2"
+  10: "plate"
+  11: "bowl"
+  12: "fork"
+  13: "spoon"
+  14: "cereal_box"
+  15: "milk_carton"
+  20: "bookshelf"
+  21: "book_1"
+  22: "book_2"
