@@ -815,7 +815,7 @@ class MoveItController(Node, CollisionObjectMixin):
     # ==================== CARTESIAN PLANNING ====================
     
     def move_cartesian(self, waypoints, eef_step=0.005, jump_threshold=0.0, 
-                       avoid_collisions=True, max_velocity_scaling=0.02):
+                       avoid_collisions=True, max_velocity_scaling=0.005):
         """
         Execute Cartesian path through waypoints
         
@@ -1171,13 +1171,12 @@ class MoveItController(Node, CollisionObjectMixin):
                 (eef_step, 2.0, True, "standard with collision avoidance"),
                 (eef_step * 0.5, 3.0, True, "smaller steps, relaxed jumps"),
                 (eef_step, 5.0, True, "very relaxed jumps"),
-                (eef_step, 5.0, False, "no collision checking"),
             ]
             
             for step, jump, avoid_coll, desc in cartesian_configs:
                 self.get_logger().info(f"Trying Cartesian with {desc}...")
                 if self.move_cartesian([target_pose], eef_step=step, 
-                                     jump_threshold=jump, max_velocity_scaling=0.02,
+                                     jump_threshold=jump, max_velocity_scaling=0.005,
                                      avoid_collisions=avoid_coll):
                     self.use_default_planner()
                     self.get_logger().info(f"✓ High-level LIN move successful (Cartesian path - {desc})")
@@ -1197,6 +1196,7 @@ class MoveItController(Node, CollisionObjectMixin):
     def HIGH_LEVEL_move_lin_relative(self, dx=0.0, dy=0.0, dz=0.0):
         """High-level LIN relative move using default planner."""
         self.get_logger().info("Starting high-level LIN relative move...")
+        self.get_logger().info(f"dx: {dx}, dy: {dy}, dz: {dz}")
         # self.use_pilz_lin()
         current_pose = self.get_current_pose()
         if current_pose is None:
@@ -1293,9 +1293,30 @@ class MoveItController(Node, CollisionObjectMixin):
             f"Step 1: Moving to approach pose (Pilz PTP) -> "
             f"{approach_pose.position.x:.3f}, {approach_pose.position.y:.3f}, {approach_pose.position.z:.3f}"
         )
-        if not self.HIGH_LEVEL_move_lin(approach_pose):
-            self.get_logger().error("Failed to reach approach pose")
-            return False
+
+        delta_x1 = approach_pose.position.x - self.get_current_pose().position.x
+        delta_y1 = approach_pose.position.y - self.get_current_pose().position.y
+        delta_z1 = approach_pose.position.z - self.get_current_pose().position.z
+
+        if not self.HIGH_LEVEL_move_lin_relative(dx=delta_x1):
+            self.get_logger().error("Failed to do x axis movement first")
+            if not self.HIGH_LEVEL_move_lin(approach_pose):
+                self.get_logger().error("Failed to reach approach pose")
+                return False
+        elif not self.HIGH_LEVEL_move_lin_relative(dy=delta_y1):
+            self.get_logger().error("Failed to do y axis movement first")
+            if not self.HIGH_LEVEL_move_lin(approach_pose):
+                self.get_logger().error("Failed to reach approach pose")
+                return False
+        elif not self.HIGH_LEVEL_move_lin_relative(dz=delta_z1):
+            self.get_logger().error("Failed to do z axis movement first")
+            if not self.HIGH_LEVEL_move_lin(approach_pose):
+                self.get_logger().error("Failed to reach approach pose")
+                return False
+        else:
+            self.get_logger().info("Successfully moved to approach pose by x and y axis movement first")
+
+        time.sleep(0.5)
 
         # Step 2: Open gripper
         self.get_logger().info("Step 2: Opening gripper...")
@@ -1353,7 +1374,7 @@ class MoveItController(Node, CollisionObjectMixin):
         return True
 
 
-    def place_object_with_start(self, object_name, start_pose, place_pose, retreat_distance=0.15):
+    def place_object_with_start(self, object_name, start_pose, place_pose, retreat_distance_x=0.07, retreat_distance_z=0.15):
         """
         Execute complete place operation using Pilz planners.
 
@@ -1391,6 +1412,7 @@ class MoveItController(Node, CollisionObjectMixin):
             f"Step 1: Moving to place pre-pose x, y (Pilz PTP) -> "
             f"{place_pre_pose_eef.position.x:.3f}, {place_pre_pose_eef.position.y:.3f}, {place_pre_pose_eef.position.z:.3f}"
         )
+        
 
         if not self.HIGH_LEVEL_move_lin_relative(dx=dx, dy=dy):
             self.get_logger().error("Failed to reach place pre-pose")
@@ -1423,9 +1445,30 @@ class MoveItController(Node, CollisionObjectMixin):
             return False
         time.sleep(2.5)  # Increased wait for gripper to fully open and release object
 
-        # Step 4: Retreat upward using Pilz LIN
-        self.get_logger().info(f"Step 4: Retreating upward by {retreat_distance} m (Pilz LIN)...")
-        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
+        # Step 4: Retreat - check if object is bowl or plate (need horizontal retreat first)
+        # Extract marker_id from object_name (format: "detected_object_10")
+        marker_id = None
+        try:
+            if object_name.startswith("detected_object_"):
+                marker_id_str = object_name.replace("detected_object_", "")
+                marker_id = int(marker_id_str)
+        except (ValueError, AttributeError):
+            pass
+        
+        # Check if object is bowl (11) or plate (10) - need to retreat horizontally first
+        if retreat_distance_x > 0:
+            horizontal_retreat = -retreat_distance_x  # Move back in -X direction
+            self.get_logger().info(
+                f"Step 4a: Retreating horizontally by {horizontal_retreat:.3f} m (Pilz LIN) "
+                f"to clear {object_name} top surface...")
+            if not self.HIGH_LEVEL_move_lin_relative(dx=horizontal_retreat):
+                self.get_logger().error("Failed to retreat horizontally")
+                return False
+            time.sleep(0.5)
+
+        # Step 4b: Retreat upward using Pilz LIN
+        self.get_logger().info(f"Step 4b: Retreating upward by {retreat_distance_z} m (Pilz LIN)...")
+        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance_z):
             self.get_logger().error("Failed to retreat upward")
             return False
         
@@ -1652,8 +1695,29 @@ class MoveItController(Node, CollisionObjectMixin):
             return False
         time.sleep(2.5)  # Increased wait for gripper to fully open and release object
 
-        # Step 3: Retreat upward using Pilz LIN
-        self.get_logger().info(f"Step 3: Retreating upward by {retreat_distance} m (Pilz LIN)...")
+        # Step 3: Retreat - check if object is bowl or plate (need horizontal retreat first)
+        # Extract marker_id from object_name (format: "detected_object_10")
+        marker_id = None
+        try:
+            if object_name.startswith("detected_object_"):
+                marker_id_str = object_name.replace("detected_object_", "")
+                marker_id = int(marker_id_str)
+        except (ValueError, AttributeError):
+            pass
+        
+        # Check if object is bowl (11) or plate (10) - need to retreat horizontally first
+        if marker_id in [10, 11]:  # plate or bowl
+            horizontal_retreat = -0.07  # Move back in -X direction
+            self.get_logger().info(
+                f"Step 3a: Retreating horizontally by {horizontal_retreat:.3f} m (Pilz LIN) "
+                f"to clear {object_name} top surface...")
+            if not self.HIGH_LEVEL_move_lin_relative(dx=horizontal_retreat):
+                self.get_logger().error("Failed to retreat horizontally")
+                return False
+            time.sleep(0.5)
+
+        # Step 3b: Retreat upward using Pilz LIN
+        self.get_logger().info(f"Step 3b: Retreating upward by {retreat_distance} m (Pilz LIN)...")
         if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
             self.get_logger().error("Failed to retreat upward")
             return False

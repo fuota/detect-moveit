@@ -183,10 +183,10 @@ class RealDetectionPickPlaceController(MoveItController):
 
         self.z_surface = self.workspace_table['dz'] + self.workspace_table['height']
 
-        self.serving_area = [(self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875+0.1375*3, self.z_surface),
-                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875+0.1375*2, self.z_surface),
-                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875+0.1375, self.z_surface),
-                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875, self.z_surface),
+        self.serving_area = [(self.workspace_table['dx']+0.1, self.workspace_table['dy']+0.06875+0.1375*3, self.z_surface),
+                             (self.workspace_table['dx']+0.1, self.workspace_table['dy']+0.06875+0.1375*2, self.z_surface),
+                             (self.workspace_table['dx']+0.1, self.workspace_table['dy']+0.06875+0.1375, self.z_surface),
+                             (self.workspace_table['dx']+0.1, self.workspace_table['dy']+0.06875, self.z_surface),
                             ]  # X,Y ranges for placing objects
 
         # Detected objects storage
@@ -659,9 +659,15 @@ class RealDetectionPickPlaceController(MoveItController):
         # ==================== PICK PHASE ====================
         # approach_distance = 0.0  # Meters from the gripper to the object before pick
         grasp_distance = 0.04  # Meters from the gripper to the object after pick
+        approach_distance = 0.02
+        retreat_distance_x = 0.0
+        if marker_id in [10, 11]:
+            retreat_distance_x = 0.07
+            approach_distance += 0.07
+
         self.get_logger().info("===================== PICK PHASE ====================")
         # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
-        pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance)
+        pick_success = self.pick_object(object_name, object_pose, approach_distance=approach_distance, grasp_distance=grasp_distance)
  
         if not pick_success:
             self.get_logger().error("✗ Pick operation failed!")
@@ -699,12 +705,13 @@ class RealDetectionPickPlaceController(MoveItController):
             f"y={place_pose.position.y:.3f}, z={place_pose.position.z:.3f}")
         
         # Execute place
-        place_success = self.place_object_with_start(object_name, object_pose, place_pose)
+        
+        place_success = self.place_object_with_start(object_name, object_pose, place_pose, retreat_distance_x=retreat_distance_x)
         if place_success:
             self.get_logger().info("✓ Place operation completed successfully!")
             if self.get_current_pose():
                 object_pose = self.get_current_pose()                    
-                object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance
+                object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance + retreat_distance_x
                 object_pose.position.z = self.get_aruco_z(marker_id)
                 self.get_logger().info(f"Marker {marker_id} placed at: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
                 self.detected_objects[marker_id]['pose'] = object_pose
@@ -824,6 +831,226 @@ class RealDetectionPickPlaceController(MoveItController):
         self.get_logger().info("🔓 Movement completed - resuming pose updates")
         
         return place_success
+    
+    def execute_pick_pour_return_sequence(self, marker_id, target_pose, pour_angle_degree=45, offset_left=0.1):
+        """
+        Execute pick, move to left of target, pour, retreat, and return to original position sequence.
+        
+        Args:
+            marker_id: ArUco marker ID to pick
+            target_pose: Pose of the target (cup/plate) to pour into
+            pour_angle_degree: Angle to rotate for pouring (degrees)
+            offset_left: Distance to move left of target (in -X direction, meters)
+        Returns:
+            bool: True if successful
+        """
+        # CRITICAL: Set movement flag to block all updates
+        self.is_moving = True
+        self.get_logger().info("🔒 Movement started - blocking all pose updates")
+        
+        self.get_logger().info(f"\n{'='*60}")
+        self.get_logger().info(f"Starting pick, pour, and return sequence for marker {marker_id}")
+        self.get_logger().info(f"{'='*60}")
+        
+        obj_data = self.detected_objects.get(marker_id)
+        if not obj_data or not obj_data.get('pose'):
+            self.get_logger().error("No pose data available!")
+            self.is_moving = False
+            return False
+        
+        # Save original object position
+        original_object_pose = obj_data['pose']
+        object_name = f"detected_object_{marker_id}"
+        grasp_distance = 0.02
+        grip_force = 20/44.0 if marker_id == 5 else 25/44.0
+
+        self.move_to_home_position()
+        
+        # ==================== PICK PHASE ====================
+        self.get_logger().info("===================== PICK PHASE ====================")
+        pick_success = self.pick_object(object_name, original_object_pose, lift_distance=0.3, 
+                                       grasp_distance=grasp_distance, grip_force=grip_force)
+ 
+        if not pick_success:
+            self.get_logger().error("✗ Pick operation failed!")
+            self.is_moving = False
+            self.get_logger().info("🔓 Movement completed - resuming pose updates")
+            return False
+        
+        self.picked_objects.add(marker_id)
+        self.get_logger().info("✓ Pick operation completed successfully!")
+        
+        # Get current gripper pose after pick
+        current_gripper_pose = self.get_current_pose()
+        if not current_gripper_pose:
+            self.get_logger().error("Failed to get current pose after pick!")
+            self.is_moving = False
+            return False
+        
+        # Calculate current object position (relative to gripper)
+        current_object_x = current_gripper_pose.position.x + self.GRIPPER_INNER_LENGTH + grasp_distance
+        current_object_y = current_gripper_pose.position.y
+        
+        # ==================== MOVE TO LEFT OF TARGET ====================
+        self.get_logger().info("==================== MOVE TO POUR POSITION ====================")
+        
+        # Calculate pour position: left of target (in -X direction)
+        pour_position_x = target_pose.position.x 
+        pour_position_y = target_pose.position.y + offset_left
+
+        
+        # Calculate movement needed
+        dx = pour_position_x - current_object_x
+        dy = pour_position_y - current_object_y
+        
+        self.get_logger().info(
+            f"Moving to pour position (left of target): "
+            f"target=({target_pose.position.x:.3f}, {target_pose.position.y:.3f}), "
+            f"pour_pos=({pour_position_x:.3f}, {pour_position_y:.3f}), "
+            f"movement=({dx:.3f}, {dy:.3f})")
+        
+        # Move in X direction first
+        if abs(dx) > 0.001:
+            if not self.HIGH_LEVEL_move_lin_relative(dx=dx):
+                self.get_logger().error("Failed to move to pour position (X)")
+                self.is_moving = False
+                return False
+            time.sleep(0.5)
+        
+        # Move in Y direction
+        if abs(dy) > 0.001:
+            if not self.HIGH_LEVEL_move_lin_relative(dy=dy):
+                self.get_logger().error("Failed to move to pour position (Y)")
+                self.is_moving = False
+                return False
+            time.sleep(0.5)
+        
+        # ==================== DESCEND TO POUR HEIGHT ====================
+        self.get_logger().info("==================== DESCEND TO POUR HEIGHT ====================")
+        z_pour = target_pose.position.z + 0.2
+        current_z = self.get_current_pose().position.z
+        dz = z_pour - current_z
+        
+        self.get_logger().info(
+            f"Descending to pour height: z_pour={z_pour:.3f}, current_z={current_z:.3f}, dz={dz:.3f}")
+        
+        if not self.HIGH_LEVEL_move_lin_relative(dz=dz):
+            self.get_logger().error("Failed to descend to pour height")
+            self.is_moving = False
+            return False
+        time.sleep(0.5)
+        
+        # ==================== POUR ====================
+        self.get_logger().info("==================== POURING ====================")
+        if not self.HIGH_LEVEL_pour(pour_angle_degree):
+            self.get_logger().error("Pouring motion failed")
+            self.is_moving = False
+            return False
+        
+        # ==================== RETREAT (LIFT UP) ====================
+        self.get_logger().info("==================== RETREAT (LIFT) ====================")
+        retreat_distance = 0.15
+        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
+            self.get_logger().error("Failed to retreat upward")
+            self.is_moving = False
+            return False
+        time.sleep(0.5)
+        
+        # ==================== RETURN TO ORIGINAL POSITION ====================
+        self.get_logger().info("==================== RETURN TO ORIGINAL POSITION ====================")
+        
+        # Get current position after retreat
+        current_after_pour = self.get_current_pose()
+        if not current_after_pour:
+            self.get_logger().error("Failed to get current pose after pour!")
+            self.is_moving = False
+            return False
+        
+        # Calculate current object position
+        current_obj_x_after = current_after_pour.position.x + self.GRIPPER_INNER_LENGTH + grasp_distance
+        current_obj_y_after = current_after_pour.position.y
+        
+        # Calculate movement back to original position
+        dx_return = original_object_pose.position.x - current_obj_x_after
+        dy_return = original_object_pose.position.y - current_obj_y_after
+        
+        self.get_logger().info(
+            f"Returning to original position: "
+            f"original=({original_object_pose.position.x:.3f}, {original_object_pose.position.y:.3f}), "
+            f"current=({current_obj_x_after:.3f}, {current_obj_y_after:.3f}), "
+            f"movement=({dx_return:.3f}, {dy_return:.3f})")
+        
+        # Move back in X
+        if abs(dx_return) > 0.001:
+            if not self.HIGH_LEVEL_move_lin_relative(dx=dx_return):
+                self.get_logger().error("Failed to return to original position (X)")
+                self.is_moving = False
+                return False
+            time.sleep(0.5)
+        
+        # Move back in Y
+        if abs(dy_return) > 0.001:
+            if not self.HIGH_LEVEL_move_lin_relative(dy=dy_return):
+                self.get_logger().error("Failed to return to original position (Y)")
+                self.is_moving = False
+                return False
+            time.sleep(0.5)
+        
+        # ==================== DESCEND AND PLACE ====================
+        self.get_logger().info("==================== PLACE BACK ====================")
+        
+        # Descend to original z position
+        original_z = self.get_aruco_z(marker_id)
+        current_z = self.get_current_pose().position.z
+        dz_place = original_z - current_z
+        
+        self.get_logger().info(
+            f"Descending to place: original_z={original_z:.3f}, current_z={current_z:.3f}, dz={dz_place:.3f}")
+        
+        if abs(dz_place) > 0.001:
+            if not self.HIGH_LEVEL_move_lin_relative(dz=dz_place):
+                self.get_logger().error("Failed to descend to place position")
+                self.is_moving = False
+                return False
+            time.sleep(0.5)
+        
+        # Open gripper to release
+        self.get_logger().info("Opening gripper to release object...")
+        if not self.open_gripper():
+            self.get_logger().error("Failed to open gripper")
+            self.is_moving = False
+            return False
+        time.sleep(2.5)
+        
+        
+        # Retreat upward
+        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
+            self.get_logger().error("Failed to retreat after placing")
+            self.is_moving = False
+            return False
+        
+        # Detach object
+        self.detach_object_from_gripper(object_name)
+        
+        # Update object pose (should be back at original position)
+        if self.get_current_pose():
+            final_pose = self.get_current_pose()
+            object_pose = Pose()
+            object_pose.position.x = final_pose.position.x + self.GRIPPER_INNER_LENGTH + grasp_distance
+            object_pose.position.y = final_pose.position.y
+            object_pose.position.z = self.get_aruco_z(marker_id)
+            object_pose.orientation.w = 1.0
+            
+            self.detected_objects[marker_id]['pose'] = object_pose
+            self.update_collision_object_smart(marker_id, object_pose)
+            self.get_logger().info(f"Object returned to original position: ({object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f})")
+        
+        # CRITICAL: Release movement flag
+        self.is_moving = False
+        self.get_logger().info("🔓 Movement completed - resuming pose updates")
+        self.get_logger().info("✓ Pick, pour, and return sequence completed successfully!")
+        
+        return True
     
     def execute_pick_sequence(self, marker_id):
         """
@@ -1027,7 +1254,7 @@ class RealDetectionPickPlaceController(MoveItController):
         self.get_logger().info("Starting medicine preparation...")
 
         #============PICK AND PLACE WATER CUP (marker 1)=================
-        if not self.execute_pick_and_place_sequence(1, self.convert_serving_area_to_pose(1, self.serving_area[2])):
+        if not self.execute_pick_and_place_sequence(1, self.convert_serving_area_to_pose(1, self.serving_area[1])):
             self.get_logger().error(f"Failed to prepare water cup - pick and place failed")
             return False
         
@@ -1035,25 +1262,51 @@ class RealDetectionPickPlaceController(MoveItController):
         # Wait to ensure robot has fully completed all motions
         time.sleep(3.0)
         
-        # #============PICK AND PLACE PLATE (marker 10)=================
-        # if not self.execute_pick_and_place_sequence(10, self.convert_serving_area_to_pose(self.serving_area[2])):
-        #     self.get_logger().error(f"Failed to prepare plate - pick and place failed")
-        #     return False
-        # self.get_logger().info(f"Plate placed successfully, preparing to pick water bottle...")
-        # time.sleep(3.0)
-
-        #============PICK AND POUR PLACE WATER BOTTLE (marker 6)=================
-        if not self.execute_pick_pour_place_sequence(5, self.convert_serving_area_to_pose(5, self.serving_area[0])):
-            self.get_logger().error(f"Failed to prepare water bottle - pick and pour place failed")
+        #============PICK AND PLACE PLATE (marker 10)=================
+        if not self.execute_pick_and_place_sequence(10, self.convert_serving_area_to_pose(10, self.serving_area[2])):
+            self.get_logger().error(f"Failed to prepare plate - pick and place failed")
             return False
-        self.get_logger().info(f"Water bottle placed successfully, preparing to pick medicine bottle...")
+        self.get_logger().info(f"Plate placed successfully, preparing to pick water bottle...")
+        time.sleep(3.0)
+
+        #============PICK, POUR INTO CUP, AND RETURN WATER BOTTLE=================
+        # Get water cup position (target for pouring)
+        water_cup_pose = self.detected_objects[1]['pose']
+        if not water_cup_pose:
+            self.get_logger().error("Water cup pose not available!")
+            return False
+        
+        # Create target pose for pouring (use cup's position)
+        water_cup_target_pose = Pose()
+        water_cup_target_pose.position.x = water_cup_pose.position.x
+        water_cup_target_pose.position.y = water_cup_pose.position.y
+        water_cup_target_pose.position.z = water_cup_pose.position.z
+        water_cup_target_pose.orientation.w = 1.0
+        
+        if not self.execute_pick_pour_return_sequence(5, water_cup_target_pose, pour_angle_degree=45, offset_left=0.1):
+            self.get_logger().error(f"Failed to pour water bottle into cup")
+            return False
+        self.get_logger().info(f"Water bottle poured into cup and returned successfully, preparing to pour medicine bottle...")
         time.sleep(3.0)
         
-        #============PICK AND PLACE MEDICINE BOTTLE (marker 7)=================
-        if not self.execute_pick_pour_place_sequence(8, self.convert_serving_area_to_pose(8, self.serving_area[3]), pour_angle_degree=-45):
-            self.get_logger().error(f"Failed to prepare medicine bottle - pick and place failed")
+        #============PICK, POUR INTO PLATE, AND RETURN MEDICINE BOTTLE=================
+        # Get plate position (target for pouring)
+        plate_pose = self.detected_objects[10]['pose']
+        if not plate_pose:
+            self.get_logger().error("Plate pose not available!")
             return False
-        self.get_logger().info(f"Medicine bottle placed successfully, medicine preparation completed!")
+        
+        # Create target pose for pouring (use plate's position)
+        plate_target_pose = Pose()
+        plate_target_pose.position.x = plate_pose.position.x
+        plate_target_pose.position.y = plate_pose.position.y
+        plate_target_pose.position.z = plate_pose.position.z
+        plate_target_pose.orientation.w = 1.0
+        
+        if not self.execute_pick_pour_return_sequence(8, plate_target_pose, pour_angle_degree=-45, offset_left=-0.1):
+            self.get_logger().error(f"Failed to pour medicine bottle into plate")
+            return False
+        self.get_logger().info(f"Medicine bottle poured into plate and returned successfully, medicine preparation completed!")
         return True
 
     def organize_books(self):
