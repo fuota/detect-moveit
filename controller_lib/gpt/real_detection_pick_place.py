@@ -227,7 +227,26 @@ class RealDetectionPickPlaceController(MoveItController):
             callback_group=self.callback_group
         )
         
-        self.get_logger().info("Medicine preparation service available at /prepare_medicine")
+        # Create service for tableware setup
+        self.setup_tableware_service = self.create_service(
+            Trigger,
+            'setup_tableware',
+            self.setup_tableware_service_callback,
+            callback_group=self.callback_group
+        )
+        
+        # Create service for book organization
+        self.organize_books_service = self.create_service(
+            Trigger,
+            'organize_books',
+            self.organize_books_service_callback,
+            callback_group=self.callback_group
+        )
+        
+        self.get_logger().info("Services available:")
+        self.get_logger().info("  - /prepare_medicine")
+        self.get_logger().info("  - /setup_tableware")
+        self.get_logger().info("  - /organize_books")
         
         self.get_logger().info("=== Real Detection Pick & Place Controller Started ===")
         self.get_logger().info("Waiting for ArUco detections...")
@@ -245,6 +264,34 @@ class RealDetectionPickPlaceController(MoveItController):
             response.message = "Medicine preparation completed successfully"
         else:
             response.message = "Medicine preparation failed"
+        
+        return response
+    
+    def setup_tableware_service_callback(self, request, response):
+        """Service callback to trigger tableware setup"""
+        self.get_logger().info("Received tableware setup request from frontend")
+        
+        success = self.set_up_tableware()
+        
+        response.success = success
+        if success:
+            response.message = "Tableware setup completed successfully"
+        else:
+            response.message = "Tableware setup failed"
+        
+        return response
+    
+    def organize_books_service_callback(self, request, response):
+        """Service callback to trigger book organization"""
+        self.get_logger().info("Received book organization request from frontend")
+        
+        success = self.organize_books()
+        
+        response.success = success
+        if success:
+            response.message = "Book organization completed successfully"
+        else:
+            response.message = "Book organization failed"
         
         return response 
     # ==================== ARUCO DETECTION CALLBACKS ====================
@@ -1416,7 +1463,7 @@ def main(args=None):
     # Wait for valid pose before executing
     if controller.wait_for_valid_pose(timeout=15.0):
         controller.display_detected_objects()
-        controller.set_up_tableware()
+        # controller.set_up_tableware()
         # controller.prepare_medicine() 
         # controller.organize_books()
        
