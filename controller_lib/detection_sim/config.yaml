@@ -12,25 +12,25 @@ marker_size: 0.025
 #   - id: ArUco marker ID (6 = water_bottle, 7 = medicine_bottle)
 #   - pose: Position (x, y, z) and orientation (qx, qy, qz, qw) in base_link frame
 simulated_objects:
-- id: 1  # water cup
-  pose:
-    x: 0.7
-    y: 0.05
-    z: 0.3085  
-    qx: 0.0
-    qy: 0.0
-    qz: 0.0
-    qw: 1.0
+# - id: 1  # water cup
+#   pose:
+#     x: 0.7
+#     y: 0.05
+#     z: 0.3085  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
 
-- id: 5  # water bottle 1
-  pose:
-    x: 0.85
-    y: 0.18
-    z: 0.3297  
-    qx: 0.0
-    qy: 0.0
-    qz: 0.0
-    qw: 1.0
+# - id: 5  # water bottle 1
+#   pose:
+#     x: 0.85
+#     y: 0.18
+#     z: 0.3297  
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
 
 # - id: 6  # water bottle 2
 #   pose:
@@ -52,15 +52,15 @@ simulated_objects:
 #     qz: 0.0
 #     qw: 1.0
 
-- id: 8  # medicine bottle 2
-  pose:
-    x: 0.88
-    y: -0.26
-    z: 0.3055 
-    qx: 0.0
-    qy: 0.0
-    qz: 0.0
-    qw: 1.0
+# - id: 8  # medicine bottle 2
+#   pose:
+#     x: 0.88
+#     y: -0.26
+#     z: 0.3055 
+#     qx: 0.0
+#     qy: 0.0
+#     qz: 0.0
+#     qw: 1.0
 
 # - id: 10  # plate
 #   pose:
@@ -72,54 +72,65 @@ simulated_objects:
 #     qz: 0.0
 #     qw: 1.0
 
+#-----------SET UP TABLEWARE OBJECTS --------
+- id: 11  # bowl 
+  pose:
+    x: 0.8
+    y: -0.05
+    z: 0.3265  
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
 
-# - id: 2  # bookshelf (static)
+
+- id: 12  # fork 
+  pose:
+    x: 0.74
+    y: 0.17
+    z: 0.31  
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0
+
+- id: 13  # spoon 
+  pose:
+    x: 0.78
+    y: -0.19
+    z: 0.31  
+    qx: 0.0
+    qy: 0.0
+    qz: 0.0
+    qw: 1.0  
+
+#-------- ORGANIZE BOOKS OBJECTS --------
+
+# - id: 20  # bookshelf (static)
 #   pose:
-#     x: 0.7
-#     y: -0.11
+#     x: 0.91
+#     y: 0.01
 #     z: 0.285  
 #     qx: 0.0
 #     qy: 0.0
 #     qz: 0.0
 #     qw: 1.0
 
-
-# - id: 2  # bookshelf (static)
+# - id: 21  # book 1 (static)
 #   pose:
 #     x: 0.7
-#     y: -0.11
-#     z: 0.285  
+#     y: 0.171
+#     z: 0.335  
 #     qx: 0.0
 #     qy: 0.0
 #     qz: 0.0
 #     qw: 1.0
 
-
-# - id: 2  # bookshelf (static)
+# - id: 22  # book 2 (static)
 #   pose:
-#     x: 0.7
-#     y: -0.11
-#     z: 0.285  
-#     qx: 0.0
-#     qy: 0.0
-#     qz: 0.0
-#     qw: 1.0
-
-# - id: 2  # bookshelf (static)
-#   pose:
-#     x: 0.7
-#     y: -0.11
-#     z: 0.285  
-#     qx: 0.0
-#     qy: 0.0
-#     qz: 0.0
-#     qw: 1.0
-
-# - id: 2  # bookshelf (static)
-#   pose:
-#     x: 0.7
-#     y: -0.11
-#     z: 0.285  # 0.26 + 0.15 = center height of 30cm shelf
+#     x: 0.68
+#     y: -0.2
+#     z: 0.335 # 0.26 + 0.15 = center height of 30cm shelf
 #     qx: 0.0
 #     qy: 0.0
 #     qz: 0.0
