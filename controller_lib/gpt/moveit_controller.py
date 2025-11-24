@@ -20,13 +20,17 @@ from moveit_msgs.action import MoveGroup, ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.msg import JointConstraint, Constraints, PositionConstraint, OrientationConstraint
-from moveit_msgs.msg import MotionPlanRequest, PlanningOptions, RobotState
+from moveit_msgs.msg import  RobotState
 from moveit_msgs.srv import GetMotionPlan
 from sensor_msgs.msg import JointState
 from tf_transformations import quaternion_multiply, quaternion_from_euler
 import time
 import math
 import tf2_ros
+import struct
+import os
+
+from collision_objects import CollisionObjectMixin
 
 
         
@@ -48,7 +52,7 @@ def euler_to_quaternion(roll, pitch, yaw):
     return (x, y, z, w)
 
 
-class MoveItController(Node):
+class MoveItController(Node, CollisionObjectMixin):
     """
     Base class for MoveIt2 control of Kinova 7-DOF arm
     
@@ -56,7 +60,7 @@ class MoveItController(Node):
     - Standard motion planning
     - Cartesian path planning
     - Gripper control
-    - Collision object management
+    - Collision object management (via CollisionObjectMixin)
     - Object attachment/detachment
     """
     
@@ -1045,96 +1049,17 @@ class MoveItController(Node):
         return self.control_gripper("close", grip_force)
     
     # ==================== COLLISION OBJECTS ====================
+    # Collision object methods are now provided by CollisionObjectMixin
+    # See collision_objects.py for implementation
     
-    def add_box_collision_object(self, name, x, y, z, width, depth, height):
-        """Add a box collision object to the planning scene"""
-        self.get_logger().info(f"Adding box collision object '{name}'")
-        
-        collision_object = CollisionObject()
-        collision_object.header.frame_id = self.base_frame
-        collision_object.header.stamp = self.get_clock().now().to_msg()
-        collision_object.id = name
-        
-        box = SolidPrimitive()
-        box.type = SolidPrimitive.BOX
-        box.dimensions = [width, depth, height]
-        
-        box_pose = Pose()
-        box_pose.position.x = float(x)
-        box_pose.position.y = float(y)
-        box_pose.position.z = float(z)
-        box_pose.orientation.w = 1.0
-        
-        collision_object.primitives.append(box)
-        collision_object.primitive_poses.append(box_pose)
-        collision_object.operation = CollisionObject.ADD
-        
-        planning_scene = PlanningScene()
-        planning_scene.world.collision_objects.append(collision_object)
-        planning_scene.is_diff = True
-        
-        self.planning_scene_pub.publish(planning_scene)
-        time.sleep(0.5)
-        
-        self.collision_objects_added.add(name)
-        self.get_logger().info(f"✓ Box '{name}' added")
-        return True
-    
-    def add_cylinder_collision_object(self, name, x, y, z, radius, height):
-        """Add a cylinder collision object to the planning scene"""
-        self.get_logger().info(f"Adding cylinder collision object '{name}'")
-        
-        collision_object = CollisionObject()
-        collision_object.header.frame_id = self.base_frame
-        collision_object.header.stamp = self.get_clock().now().to_msg()
-        collision_object.id = name
-        
-        cylinder = SolidPrimitive()
-        cylinder.type = SolidPrimitive.CYLINDER
-        cylinder.dimensions = [height, radius]
-        
-        cylinder_pose = Pose()
-        cylinder_pose.position.x = float(x)
-        cylinder_pose.position.y = float(y)
-        cylinder_pose.position.z = float(z)
-        cylinder_pose.orientation.w = 1.0
-        
-        collision_object.primitives.append(cylinder)
-        collision_object.primitive_poses.append(cylinder_pose)
-        collision_object.operation = CollisionObject.ADD
-        
-        planning_scene = PlanningScene()
-        planning_scene.world.collision_objects.append(collision_object)
-        planning_scene.is_diff = True
-        
-        self.planning_scene_pub.publish(planning_scene)
-        time.sleep(0.5)
-        
-        self.collision_objects_added.add(name)
-        self.get_logger().info(f"✓ Cylinder '{name}' added")
-        return True
-    
-    def remove_collision_object(self, name):
-        """Remove a collision object from the planning scene"""
-        if name not in self.collision_objects_added:
-            self.get_logger().warn(f"Object '{name}' not in tracked objects")
-            return False
-        
-        collision_object = CollisionObject()
-        collision_object.id = name
-        collision_object.operation = CollisionObject.REMOVE
-        
-        planning_scene = PlanningScene()
-        planning_scene.world.collision_objects.append(collision_object)
-        planning_scene.is_diff = True
-        
-        self.planning_scene_pub.publish(planning_scene)
-        self.collision_objects_added.remove(name)
-        
-        self.get_logger().info(f"✓ Removed collision object '{name}'")
-        return True
-    
-    
+    # Removed methods (now in CollisionObjectMixin):
+    # - add_box_collision_object
+    # - add_cylinder_collision_object
+    # - add_book_collision_object
+    # - _load_stl_binary
+    # - check_stl_dimensions
+    # - add_mesh_collision_object
+    # - remove_collision_object
     #======================ATTACH DETACH FIX=========================
     def attach_object_to_gripper(self, object_name):
         """Attach object from world to gripper safely."""
@@ -1546,23 +1471,28 @@ class MoveItController(Node):
             f"{place_pre_pose_eef.position.x:.3f}, {place_pre_pose_eef.position.y:.3f}, {place_pre_pose_eef.position.z:.3f}"
         )
 
-        if not self.HIGH_LEVEL_move_lin_relative(dx=dx, dy=dy):
-            self.get_logger().error("Failed to reach place pre-pose")
+        if not self.HIGH_LEVEL_move_lin_relative(dx=dx):
+            self.get_logger().error("Failed to reach place pre-pose along x axis")
             return False
         time.sleep(0.5)
 
+        if not self.HIGH_LEVEL_move_lin_relative(dy=dy):
+            self.get_logger().error("Failed to reach place pre-pose along y axis")
+            return False
+        time.sleep(0.5)
 
         # Step 2: Descend with Pilz LIN to pour height
         z_pour = place_pose.position.z + 0.15
         dz = z_pour - place_pre_pose_eef.position.z
         self.get_logger().info(
-            f"Step 2: Descending to pour height (Pilz LIN) -> with dz={dz:.3f} m -> "
+            f"Step 2: Descending to pour height (Pilz LIN) -> with z_pour={z_pour:.3f} m - place_pre_pose_eef.position.z={place_pre_pose_eef.position.z:.3f} m -> with dz={dz:.3f} m -> "
         )
         if not self.HIGH_LEVEL_move_lin_relative(dz=dz):
             self.get_logger().error("Failed to descend to pour height")
             return False
         time.sleep(0.5)
 
+        self.get_logger().warn(f"Current pose after descending to pour height: {self.get_current_pose().position.x+self.GRIPPER_INNER_LENGTH+0.02:.3f}, {self.get_current_pose().position.y:.3f}, {self.get_current_pose().position.z:.3f}")
         #Step 3: Pouring motion
         if not self.HIGH_LEVEL_pour(pour_angle_degree):
             self.get_logger().error("Pouring motion failed")

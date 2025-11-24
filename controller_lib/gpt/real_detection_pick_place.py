@@ -14,13 +14,151 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 import time
 import math
 import json
+import os
 from moveit_controller import MoveItController
 
 
 # Object name mapping: marker_id -> (name, height, radius)
-OBJECT_MAP = {
-    6: ("water_bottle", 0.18, 0.03),
-    7: ("medicine_bottle", 0.14, 0.025)
+# OBJECT_MAP = {
+#     6: ("water_bottle", 0.18, 0.03),
+#     7: ("medicine_bottle", 0.14, 0.025)
+# }
+
+# Extended object map with type information
+# Format: marker_id -> {
+#   'name': str,
+#   'type': 'cylinder' | 'mesh',
+#   'aruco_offset': (offset_x, offset_y, offset_z) - offset from ArUco position to object center/origin
+#   For 'cylinder' type:
+#     'cylinder_params': (radius, height) - cylinder dimensions
+#   For 'mesh' type:
+#     'mesh_file': str - STL filename
+#     'mesh_scale': float - scale factor for STL
+#     'handle_params': (radius, height) - cylinder handle dimensions (for moving objects only)
+#   For static objects:
+#     'is_static': True - object doesn't move, only added once
+# }
+OBJECT_MAP_EXTENDED = {
+    1: {
+        'name': 'water_cup',
+        'type': 'cylinder',
+        'aruco_offset': (0.04, 0.0, 0.0),  # TODO: Measure actual offset
+        'cylinder_params': (0.04, 0.097)  # radius, height
+    },
+    5: {
+        'name': 'water_bottle', 
+        'type': 'mesh',
+        'aruco_offset': (0.025452, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'water_bottle.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.02542, 0.1137),  # handle_radius, handle_height
+        'total_height': 0.13929
+    },
+    
+    6: {
+        'name': 'water_bottle',
+        'type': 'cylinder',
+        'aruco_offset': (0.03, 0.0, 0.0),  # TODO: Measure actual offset
+        'cylinder_params': (0.03, 0.18)  # radius, height
+    },
+    7: {
+        'name': 'medicine_bottle1', 
+        'type': 'cylinder',
+        'aruco_offset': (0.025, 0.0, 0.0),  # TODO: Measure actual offset
+        'cylinder_params': (0.025, 0.14)  # radius, height
+    },
+    8: {
+        'name': 'medicine_bottle2', 
+        'type': 'mesh',
+        'aruco_offset': (0.03, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'medicine_bottle.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.03, 0.07849),  # handle_radius, handle_height
+        'total_height': 0.09105,
+    },
+    10: {
+        'name': 'plate',
+        'type': 'mesh',
+        'aruco_offset': (0.0257, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'plate.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.0257, 0.1),  # handle_radius, handle_height
+        'total_height': 0.11,
+    },
+    11: {
+        'name': 'bowl',
+        'type': 'mesh',
+        'aruco_offset': (0.025, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'bowl.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.025, 0.1),  # handle_radius, handle_height
+        'total_height': 0.133,
+    },
+    12: {
+        'name': 'fork',
+        'type': 'mesh',
+        'aruco_offset': (0.083145, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'fork.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.018755, 0.1),  # handle_radius, handle_height
+        'total_height': 0.1,
+    },
+    13: {
+        'name': 'spoon',
+        'type': 'mesh',
+        'aruco_offset': (0.081405, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'spoon.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.018755, 0.1),  # handle_radius, handle_height
+        'total_height': 0.1,
+    },
+    14: {
+        'name': 'cereal_box',
+        'type': 'mesh',
+        'aruco_offset': (0.0024415, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'cereal_box.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.035, 0.128),  # handle_radius, handle_height
+        'total_height': 0.14,
+    },
+    15: {
+        'name': 'milk_carton',
+        'type': 'mesh',
+        'aruco_offset': (0.03, 0.0, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'milk_carton.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.03, 0.1),  # handle_radius, handle_height
+        'total_height': 0.12,
+    },
+    
+    20: {
+        'name': 'bookshelf',
+        'type': 'mesh',
+        'is_static': True,  # Static object - only add once, don't update
+        'aruco_offset': (-0.0975, -0.035, 0.0),  # TODO: Measure actual offset
+        'mesh_file': 'shelf.stl',
+        'mesh_scale': 0.001,
+        'bookshelf_params': (0.05, 0.195, 0.14)  # shelf_height, shelf_depth, shelf_width (for compartment calculations)
+    },
+    21: {
+        'name': 'book_1',
+        'type': 'mesh',  # Changed to mesh if using STL, or keep as cylinder if using primitives
+        'aruco_offset': (0.065, 0.0, 0.0),  # TODO: Measure actual offset
+        'mesh_file': 'book.stl',  # If using mesh
+        'mesh_scale': 0.001,
+        'handle_params': (0.03, 0.15),  # spine_radius, spine_height (cylinder handle for grasping)
+        'total_height': 0.15,
+    },
+    22: {
+        'name': 'book_2',
+        'type': 'mesh',  # Changed to mesh if using STL, or keep as cylinder if using primitives
+        'aruco_offset': (0.065, 0.0, 0.0),  # TODO: Measure actual offset
+        'mesh_file': 'book.stl',  # If using mesh
+        'mesh_scale': 0.001,
+        'handle_params': (0.03, 0.15),  # spine_radius, spine_height (cylinder handle for grasping)
+        'total_height': 0.15,
+    }  
+
 }
 
 
@@ -43,16 +181,19 @@ class RealDetectionPickPlaceController(MoveItController):
             'height': 0.63
         }
 
-        self.serving_area = [(self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475, self.workspace_table['dz']+self.workspace_table['height']),
-                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475-0.1375, self.workspace_table['dz']+self.workspace_table['height']),
-                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475-0.1375*2, self.workspace_table['dz']+self.workspace_table['height']),
-                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.475-0.1375*3, self.workspace_table['dz']+self.workspace_table['height']),
+        self.z_surface = self.workspace_table['dz'] + self.workspace_table['height']
+
+        self.serving_area = [(self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875+0.1375*3, self.z_surface),
+                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875+0.1375*2, self.z_surface),
+                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875+0.1375, self.z_surface),
+                             (self.workspace_table['dx']+0.05, self.workspace_table['dy']+0.06875, self.z_surface),
                             ]  # X,Y ranges for placing objects
 
         # Detected objects storage
         self.detected_objects = {}  # {marker_id: {'pose': Pose, 'name': str}}
         self.marker_ids = []
         self.picked_objects = set()  # Track which objects were picked
+        self.static_objects_added = set()  # Track which static objects have been added (don't update)
         
         # Movement state - CRITICAL: blocks updates during movement
         self.is_moving = False
@@ -119,11 +260,11 @@ class RealDetectionPickPlaceController(MoveItController):
         # Update poses ONLY for currently visible objects that aren't picked
         for i, marker_id in enumerate(self.marker_ids):
             if marker_id in self.detected_objects:
-                msg.poses[i].position.y -= 0.05
+                # msg.poses[i].position.y -= 0.05 #LAB CHANGE ()
                 self.detected_objects[marker_id]['pose'] = msg.poses[i]
                 # Only update collision if object is NOT picked and NOT moving
                 if marker_id not in self.picked_objects:
-                    self.update_collision_cylinder(marker_id, msg.poses[i])
+                    self.update_collision_object_smart(marker_id, msg.poses[i])
         
         if len(msg.poses) > 0:
             self.pose_received = True
@@ -141,12 +282,48 @@ class RealDetectionPickPlaceController(MoveItController):
         self.marker_ids = new_ids
         for marker_id in self.marker_ids:
             if marker_id not in self.detected_objects:
-                self.detected_objects[marker_id] = {
-                    'pose': None,
-                    'name': OBJECT_MAP.get(marker_id, f'marker_{marker_id}')[0],
-                    'height': OBJECT_MAP.get(marker_id, f'marker_{marker_id}')[1],
-                    'radius': OBJECT_MAP.get(marker_id, f'marker_{marker_id}')[2]
-                }
+                if marker_id in OBJECT_MAP_EXTENDED:
+                    obj_config = OBJECT_MAP_EXTENDED[marker_id]
+                    obj_type = obj_config.get('type', 'cylinder')
+                    
+                    # Extract dimensions based on object type
+                    # NOTE: 'height' is REQUIRED (used for place z-position calculation)
+                    # NOTE: 'radius' is REQUIRED for moving objects (cylinder handle for grasping)
+                    if obj_type == 'cylinder':
+                        height = obj_config['cylinder_params'][1]  # cylinder height
+                        radius = obj_config['cylinder_params'][0]  # cylinder radius
+                    elif obj_type == 'mesh':
+                        # For mesh objects, get handle dimensions (for moving objects)
+                        if obj_config.get('is_static', False):
+                            # Static objects don't have handles
+                            height = obj_config.get('bookshelf_params', (0.05,))[0] if 'bookshelf_params' in obj_config else 0.15
+                            radius = None
+                        else:
+                            # Moving mesh objects have cylinder handles
+                            handle_params = obj_config.get('handle_params', (0.03, 0.15))
+                            height = handle_params[1]  # handle height
+                            radius = handle_params[0]  # handle radius
+                    else:
+                        # Fallback
+                        height = 0.15
+                        radius = 0.03
+                    
+                    self.detected_objects[marker_id] = {
+                        'pose': None,
+                        'name': obj_config['name'],
+                        'height': height,  # REQUIRED: Used in place operations
+                        'radius': radius,  # OPTIONAL: For future use (grasp planning, collision estimation)
+                        'type': obj_type   # NEW: Store type for easier access
+                    }
+                else:
+                    # Fallback for unknown marker IDs
+                    self.detected_objects[marker_id] = {
+                        'pose': None,
+                        'name': f'marker_{marker_id}',
+                        'height': 0.15,
+                        'radius': 0.03,
+                        'type': 'cylinder'
+                    }
     
     def names_callback(self, msg: String):
         """Update object names from JSON - IGNORED during movement"""
@@ -164,23 +341,165 @@ class RealDetectionPickPlaceController(MoveItController):
     # ==================== COLLISION OBJECT MANAGEMENT ====================
     
     def update_collision_cylinder(self, marker_id, pose: Pose):
-        """Create or update collision cylinder for detected object"""
-        object_name = f"detected_object_{marker_id}"
+        """
+        Create or update collision cylinder for detected object.
+        Applies aruco_offset to calculate the correct cylinder center position.
         
-        # Calculate height from table (z=0.09 is reference)
-        height = (pose.position.z - (self.workspace_table['dz'] + self.workspace_table['height'])) * 2
-        radius = OBJECT_MAP.get(marker_id, (None, None, 0.03))[2]
-        center_x = pose.position.x + OBJECT_MAP.get(marker_id, (None, None, 0.0))[2]  # Offset by radius
-
-
+        Args:
+            marker_id: ArUco marker ID
+            pose: Detected ArUco marker pose
+        """
+        object_name = f"detected_object_{marker_id}"
+        obj_config = OBJECT_MAP_EXTENDED.get(marker_id, {})
+        
+        # Get cylinder parameters
+        cylinder_params = obj_config.get('cylinder_params', (0.03, 0.15))
+        radius = cylinder_params[0]
+        base_height = cylinder_params[1]
+        
+        # Get ArUco offset (offset from ArUco to cylinder center)
+        aruco_offset = obj_config.get('aruco_offset', (0.0, 0.0, 0.0))
+        offset_x, offset_y, offset_z = aruco_offset
+        
+        # Calculate actual height from table
+        height = (pose.position.z - (self.z_surface)) * 2
+        
+        # Calculate cylinder center position: ArUco position + offset
+        center_x = pose.position.x + offset_x
+        center_y = pose.position.y + offset_y
+        center_z = pose.position.z + offset_z
+        
+        self.get_logger().debug(
+            f"Cylinder {marker_id}: ArUco at ({pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}), "
+            f"offset ({offset_x:.3f}, {offset_y:.3f}, {offset_z:.3f}), "
+            f"center at ({center_x:.3f}, {center_y:.3f}, {center_z:.3f})")
+        
         # Add/update cylinder using parent class method
         self.add_cylinder_collision_object(
             object_name,
             x=center_x,
-            y=pose.position.y,
-            z=pose.position.z,
+            y=center_y,
+            z=center_z,
             radius=radius,
             height=height)
+    
+    def update_collision_mesh(self, marker_id, pose: Pose):
+        """
+        Create or update collision object for a mesh object from STL file.
+        Applies aruco_offset to calculate the correct mesh position.
+        
+        Args:
+            marker_id: ArUco marker ID
+            pose: Detected ArUco marker pose
+        """
+        obj_config = OBJECT_MAP_EXTENDED[marker_id]
+        mesh_file = obj_config.get('mesh_file', 'object.stl')
+        mesh_scale = obj_config.get('mesh_scale', 0.001)
+        
+        object_name = f"detected_object_{marker_id}"
+        
+        # Get ArUco offset (offset from ArUco to mesh center/origin)
+        aruco_offset = obj_config.get('aruco_offset', (0.0, 0.0, 0.0))
+        offset_x, offset_y, offset_z = aruco_offset
+        
+        # Calculate mesh position: ArUco position + offset
+        mesh_x = pose.position.x + offset_x
+        mesh_y = pose.position.y + offset_y
+        mesh_z = pose.position.z + offset_z
+        
+        self.get_logger().info(
+            f"Detected mesh object {marker_id} ArUco at: "
+            f"x={pose.position.x:.3f}, y={pose.position.y:.3f}, z={pose.position.z:.3f}")
+        self.get_logger().info(
+            f"Applying offset ({offset_x:.3f}, {offset_y:.3f}, {offset_z:.3f}) -> "
+            f"mesh at ({mesh_x:.3f}, {mesh_y:.3f}, {mesh_z:.3f})")
+        self.get_logger().info(f"Loading mesh: {mesh_file}")
+        
+        # Add mesh using parent class method
+        # Mesh file path will be automatically resolved in collision_objects.py
+        # Use center_origin=True if STL is already centered at origin, False otherwise
+        success = self.add_mesh_collision_object(
+            name=object_name,
+            mesh_file=mesh_file,  # Just pass filename, path resolution happens in collision_objects.py
+            x=mesh_x,
+            y=mesh_y,
+            z=mesh_z,
+            scale_x=mesh_scale,
+            scale_y=mesh_scale,
+            scale_z=mesh_scale,
+        )
+        
+        if not success:
+            self.get_logger().error(f"Failed to load mesh: {mesh_file}")
+    
+    def update_collision_bookshelf(self, marker_id, pose: Pose):
+        """
+        Create bookshelf collision object from STL mesh based on detected ArUco marker.
+        This is called ONCE when bookshelf is first detected, then marked as static.
+        Uses the unified update_collision_mesh function.
+        
+        Args:
+            marker_id: ArUco marker ID
+            pose: Detected pose (ArUco marker position)
+        """
+        # Use the unified mesh update function
+        self.update_collision_mesh(marker_id, pose)
+        
+        # Mark as static - don't update again
+        self.static_objects_added.add(marker_id)
+        
+        obj_config = OBJECT_MAP_EXTENDED[marker_id]
+        bookshelf_params = obj_config.get('bookshelf_params', (0.05, 0.195, 0.14))
+        shelf_height = bookshelf_params[0]
+        shelf_depth = bookshelf_params[1]
+        shelf_width = bookshelf_params[2]
+        mesh_scale = obj_config.get('mesh_scale', 0.001)
+        
+        self.get_logger().info(
+            f"✓ Bookshelf mesh added as static object (marker {marker_id}): "
+            f"h={shelf_height:.3f}m, d={shelf_depth:.3f}m, w={shelf_width:.3f}m, scale={mesh_scale}")
+    
+    def update_collision_object_smart(self, marker_id, pose: Pose):
+        """
+        Automatically update collision object based on OBJECT_MAP_EXTENDED.
+        Handles 'cylinder' and 'mesh' types.
+        Static objects (like bookshelf) are only added once.
+        
+        Args:
+            marker_id: ArUco marker ID
+            pose: Detected pose (ArUco marker position)
+        """
+        if marker_id in OBJECT_MAP_EXTENDED:
+            obj_config = OBJECT_MAP_EXTENDED[marker_id]
+            obj_type = obj_config.get('type', 'cylinder')
+            is_static = obj_config.get('is_static', False)
+            
+            # Check if static object already added
+            if is_static and marker_id in self.static_objects_added:
+                # Don't update static objects after first detection
+                return
+            
+            if obj_type == 'mesh':
+                # Use mesh collision object
+                if is_static:
+                    # Static objects use special function (e.g., bookshelf)
+                    self.update_collision_bookshelf(marker_id, pose)
+                else:
+                    # Moving mesh objects
+                    self.update_collision_mesh(marker_id, pose)
+            elif obj_type == 'cylinder':
+                # Use cylinder collision object
+                self.update_collision_cylinder(marker_id, pose)
+            else:
+                # Fallback to cylinder for unknown types
+                self.get_logger().warn(
+                    f"Unknown object type '{obj_type}' for marker {marker_id}, using cylinder")
+                self.update_collision_cylinder(marker_id, pose)
+        else:
+            # Fallback to simple cylinder if not in extended map
+            self.get_logger().warn(
+                f"Marker {marker_id} not in OBJECT_MAP_EXTENDED, using default cylinder")
+            self.update_collision_cylinder(marker_id, pose)
     
     def remove_detected_object_collision(self, marker_id):
         """Remove collision cylinder for object no longer detected"""
@@ -228,6 +547,22 @@ class RealDetectionPickPlaceController(MoveItController):
         
         self.get_logger().info("="*60)
     
+    # ==================== HELPER FUNCTIONS ====================
+    def get_aruco_z(self, marker_id):
+        object_data = OBJECT_MAP_EXTENDED.get(marker_id)
+        if not object_data:
+            self.get_logger().error(f"No object data found for marker {marker_id}")
+            return None
+        
+        if object_data.get('type') == 'cylinder':
+            return self.z_surface + object_data.get('cylinder_params')[1] / 2
+        elif object_data.get('type') == 'mesh':
+            return self.z_surface + object_data.get('total_height') / 2
+        else:
+            self.get_logger().error(f"Unknown object type '{object_data.get('type')}' for marker {marker_id}")
+            return None
+        
+    
     # ==================== PICK EXECUTION ====================
     def execute_pick_move_sequence(self, marker_id, place_pose):
         self.is_moving = True
@@ -269,17 +604,17 @@ class RealDetectionPickPlaceController(MoveItController):
             self.get_logger().info("✓ Place operation completed successfully!")
             if self.get_current_pose():
                 object_pose = self.get_current_pose()                    
-                object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance
-                object_pose.position.z = place_pose.position.z
+                object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance # x of ARUCO 
+                object_pose.position.z = self.get_aruco_z(marker_id)
                 self.get_logger().info(f"Marker {marker_id} placed at: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
                 self.detected_objects[marker_id]['pose'] = object_pose
                 self.get_logger().info(f"Add collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
-                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.update_collision_object_smart(marker_id, object_pose)  # Immediately add collision at placed location
             else:
                 self.get_logger().warn(f"Failed to get current pose for object {marker_id}")
                 object_pose = place_pose
                 self.detected_objects[marker_id]['pose'] = object_pose
-                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.update_collision_object_smart(marker_id, object_pose)  # Immediately add collision at placed location
                 self.get_logger().info(f"Added collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
       
         # CRITICAL: Release movement flag to allow updates again
@@ -324,7 +659,7 @@ class RealDetectionPickPlaceController(MoveItController):
         # ==================== PICK PHASE ====================
         # approach_distance = 0.0  # Meters from the gripper to the object before pick
         grasp_distance = 0.04  # Meters from the gripper to the object after pick
-        self.get_logger().info("\n--- PICK PHASE ---")
+        self.get_logger().info("===================== PICK PHASE ====================")
         # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
         pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance)
  
@@ -370,16 +705,16 @@ class RealDetectionPickPlaceController(MoveItController):
             if self.get_current_pose():
                 object_pose = self.get_current_pose()                    
                 object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance
-                object_pose.position.z = place_pose.position.z
+                object_pose.position.z = self.get_aruco_z(marker_id)
                 self.get_logger().info(f"Marker {marker_id} placed at: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
                 self.detected_objects[marker_id]['pose'] = object_pose
                 self.get_logger().info(f"Add collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
-                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.update_collision_object_smart(marker_id, object_pose)  # Immediately add collision at placed location
             else:
                 self.get_logger().warn(f"Failed to get current pose for object {marker_id}")
                 object_pose = place_pose
                 self.detected_objects[marker_id]['pose'] = object_pose
-                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.update_collision_object_smart(marker_id, object_pose)  # Immediately add collision at placed location
                 self.get_logger().info(f"Added collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
         else:
             self.get_logger().error("✗ Place operation failed!")
@@ -390,7 +725,7 @@ class RealDetectionPickPlaceController(MoveItController):
         
         return place_success
 
-    def execute_pick_pour_place_sequence(self, marker_id, place_pose):
+    def execute_pick_pour_place_sequence(self, marker_id, place_pose, pour_angle_degree=45):
         """
         Execute complete pick and place sequence for selected object
         
@@ -416,8 +751,8 @@ class RealDetectionPickPlaceController(MoveItController):
         
         object_pose = obj_data['pose']
         object_name = f"detected_object_{marker_id}"
-        if marker_id == 6:
-            grip_force = 20/44.0
+       
+        grip_force = 20/44.0
 
         self.move_to_home_position()
         
@@ -426,7 +761,7 @@ class RealDetectionPickPlaceController(MoveItController):
         grasp_distance = 0.02  # Meters from the gripper to the object after pick
         self.get_logger().info("===================== PICK PHASE ====================")
         # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
-        pick_success = self.pick_object(object_name, object_pose, grasp_distance=grasp_distance, grip_force=grip_force)
+        pick_success = self.pick_object(object_name, object_pose, lift_distance=0.3, grasp_distance=grasp_distance, grip_force=grip_force)
  
         if not pick_success:
             self.get_logger().error("✗ Pick operation failed!")
@@ -441,7 +776,7 @@ class RealDetectionPickPlaceController(MoveItController):
         print("\n✓ Object picked successfully!")
         
         # ==================== PLACE PHASE ====================
-        self.get_logger().info("==================== PLACE PHASE ====================")
+        self.get_logger().info("==================== PLACE POUR PHASE ====================")
 
         # Get current pose after pick
         current_pose = self.get_current_pose()
@@ -463,22 +798,23 @@ class RealDetectionPickPlaceController(MoveItController):
             f"y={place_pose.position.y:.3f}, z={place_pose.position.z:.3f}")
         
         # Execute place
-        place_success = self.place_pour_object(object_name, object_pose, place_pose)
+        place_success = self.place_pour_object(object_name, object_pose, place_pose, pour_angle_degree=pour_angle_degree)
         if place_success:
             self.get_logger().info("✓ Place operation completed successfully!")
             if self.get_current_pose():
                 object_pose = self.get_current_pose()                    
                 object_pose.position.x += self.GRIPPER_INNER_LENGTH + grasp_distance
-                object_pose.position.z = place_pose.position.z
+                object_pose.position.z = self.get_aruco_z(marker_id)
                 self.get_logger().info(f"Marker {marker_id} placed at: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
                 self.detected_objects[marker_id]['pose'] = object_pose
                 self.get_logger().info(f"Add collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
-                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.update_collision_object_smart(marker_id, object_pose)  # Immediately add collision at placed location
             else:
                 self.get_logger().warn(f"Failed to get current pose for object {marker_id}")
                 object_pose = place_pose
+                object_pose.position.z = self.get_aruco_z(marker_id)
                 self.detected_objects[marker_id]['pose'] = object_pose
-                self.update_collision_cylinder(marker_id, object_pose)  # Immediately add collision at placed location
+                self.update_collision_object_smart(marker_id, object_pose)  # Immediately add collision at placed location
                 self.get_logger().info(f"Added collision object {marker_id} at new place location: {object_pose.position.x:.3f}, {object_pose.position.y:.3f}, {object_pose.position.z:.3f}")
         else:
             self.get_logger().error("✗ Place operation failed!")
@@ -536,6 +872,9 @@ class RealDetectionPickPlaceController(MoveItController):
         
         return success
     
+
+    
+    
     # ==================== ENVIRONMENT SETUP ====================
     def add_real_object(self, name, dx, dy, dz, width, depth, height):
         """Add a real-world object as a collision box"""
@@ -590,47 +929,165 @@ class RealDetectionPickPlaceController(MoveItController):
         self.get_logger().info("✓ Static environment added")
 
 
-    def convert_serving_area_to_pose(self, area_tuple):
-        """Convert serving area tuple to Pose message"""
+    def convert_serving_area_to_pose(self, marker_id, area_tuple):
+        """Convert serving area tuple to Pose message. With z position of the gripper attached to the object.
+        
+        Args:
+            marker_id: ArUco marker ID
+            area_tuple: Tuple containing (x, y, z) position of the serving area
+        
+        Returns:
+            tuple: (x, y, z) position of the serving area
+        """
+        object_data = OBJECT_MAP_EXTENDED.get(marker_id)
+        if object_data.get('type') == 'cylinder':
+            gripper_z = object_data.get('cylinder_params')[1] / 2.0
+        elif object_data.get('type') == 'mesh':
+            gripper_z = object_data.get('handle_params')[1] / 2.0
+        else:
+            gripper_z = 0.0
+            pose_msg.orientation.w = 1.0  # Neutral orientation
+            return pose_msg
+        
         pose_msg = Pose()
         pose_msg.position.x = area_tuple[0]
         pose_msg.position.y = area_tuple[1]
-        pose_msg.position.z = area_tuple[2]
+        pose_msg.position.z = area_tuple[2] + gripper_z
         pose_msg.orientation.w = 1.0  # Neutral orientation
         return pose_msg
+    
+    def get_bookshelf_compartment_position(self, compartment_index=0):
+        """
+        Get position for placing books in bookshelf compartments.
+        Uses detected bookshelf position if available (marker ID 2).
+        
+        COORDINATE SYSTEM:
+        - Width (X): Left-right along back
+        - Depth (Y): Extends in -Y direction from back
+        - Compartments: 0=first (near back), 1=second (in -Y direction)
+        
+        Args:
+            compartment_index: 0 for first compartment (near back), 1 for second compartment (in -Y)
+        
+        Returns:
+            tuple: (x, y, z) position in base_link frame
+        """
+        # Check if bookshelf was detected (marker ID 2)
+        bookshelf_marker_id = 2
+        if bookshelf_marker_id in self.detected_objects and self.detected_objects[bookshelf_marker_id]['pose'] is not None:
+            # Use detected bookshelf position
+            bookshelf_pose = self.detected_objects[bookshelf_marker_id]['pose']
+            bookshelf_x = bookshelf_pose.position.x   # Back board center X
+            bookshelf_y = bookshelf_pose.position.y  # Back board Y position
+            bookshelf_z_center = bookshelf_pose.position.z
+            
+            # Get bookshelf dimensions from config
+            shelf_params = OBJECT_MAP_EXTENDED[bookshelf_marker_id]['bookshelf_params']
+            shelf_height = shelf_params[0]
+            shelf_depth = shelf_params[1]
+            shelf_width = shelf_params[2]
+            
+            # Calculate base z position
+            bookshelf_z = bookshelf_z_center - shelf_height / 2.0
+            
+            self.get_logger().debug(
+                f"Using detected bookshelf at: x={bookshelf_x:.3f}, y={bookshelf_y:.3f}, z={bookshelf_z:.3f}")
+        else:
+            # Fallback to hardcoded position if bookshelf not detected
+            self.get_logger().warn("Bookshelf not detected, using default position")
+            bookshelf_x = self.workspace_table['dx'] + 0.1
+            bookshelf_y = self.workspace_table['dy'] + 0.2
+            bookshelf_z = self.workspace_table['dz'] + self.workspace_table['height']
+            shelf_depth = 0.15
+            shelf_width = 0.25
+        
+        base_thickness = 0.02
+        
+        # Calculate compartment positions
+        # X: Center of back board (same for all compartments)
+        x_pos = bookshelf_x
+        
+        # Y: Center of each compartment (compartments extend in -Y direction)
+        # Compartment 0 (first): between back and middle divider
+        # Compartment 1 (second): between middle divider and front
+        compartment_depth = shelf_depth / 2.0  # Each compartment is half the depth
+        if compartment_index == 0:  # First compartment (near back)
+            y_pos = bookshelf_y - shelf_depth / 4.0  # Center of first half
+        else:  # Second compartment (in -Y direction)
+            y_pos = bookshelf_y - 3.0 * shelf_depth / 4.0  # Center of second half
+        
+        # Z: On top of base
+        z_pos = bookshelf_z + base_thickness / 2.0
+        
+        return (x_pos, y_pos, z_pos)
 
     def prepare_medicine(self):
         """Prepare medicine by picking and placing the medicine bottle"""
-        #============PICK AND PLACE WATER BOTTLE=================
-        if 6 not in self.detected_objects:
-            self.get_logger().error("Water bottle (marker 6) not detected!")
+
+        self.get_logger().info("Starting medicine preparation...")
+
+        #============PICK AND PLACE WATER CUP (marker 1)=================
+        if not self.execute_pick_and_place_sequence(1, self.convert_serving_area_to_pose(1, self.serving_area[2])):
+            self.get_logger().error(f"Failed to prepare water cup - pick and place failed")
             return False
         
-        self.get_logger().info("Preparing to pick water bottle...")
-        water_place_pose = self.convert_serving_area_to_pose(self.serving_area[0])
-        water_place_pose.position.z += self.detected_objects[6]['height'] / 2  # Adjust for object height
-        if not self.execute_pick_pour_place_sequence(6, place_pose=water_place_pose):  # Pick and place water bottle
-            self.get_logger().error("Failed to prepare medicine - water bottle pick and place failed")
-            return False
+        self.get_logger().info(f"Water cup placed successfully, preparing to pick plate...")
+        # Wait to ensure robot has fully completed all motions
+        time.sleep(3.0)
         
-        self.get_logger().info("Water bottle placed successfully, preparing to pick medicine bottle...")
-        # CRITICAL: Wait longer to ensure robot has fully completed all motions
-        # including pouring, retreating, and settling
-        time.sleep(5.0)  # Increased wait to ensure full completion
+        # #============PICK AND PLACE PLATE (marker 10)=================
+        # if not self.execute_pick_and_place_sequence(10, self.convert_serving_area_to_pose(self.serving_area[2])):
+        #     self.get_logger().error(f"Failed to prepare plate - pick and place failed")
+        #     return False
+        # self.get_logger().info(f"Plate placed successfully, preparing to pick water bottle...")
+        # time.sleep(3.0)
 
-        #============PICK AND PLACE MEDICINE BOTTLE=================
-        if 7 not in self.detected_objects:
-            self.get_logger().error("Medicine bottle (marker 7) not detected!")
+        #============PICK AND POUR PLACE WATER BOTTLE (marker 6)=================
+        if not self.execute_pick_pour_place_sequence(5, self.convert_serving_area_to_pose(5, self.serving_area[0])):
+            self.get_logger().error(f"Failed to prepare water bottle - pick and pour place failed")
             return False
-
-        self.get_logger().info("Preparing to pick medicine bottle...")
-        medicine_place_pose = self.convert_serving_area_to_pose(self.serving_area[3])
-        medicine_place_pose.position.z += self.detected_objects[7]['height'] / 2  # Adjust for object height
-        if not self.execute_pick_move_sequence(7, place_pose=medicine_place_pose):  # Pick and place medicine bottle
-            self.get_logger().error("Failed to prepare medicine - medicine bottle pick and place failed")
+        self.get_logger().info(f"Water bottle placed successfully, preparing to pick medicine bottle...")
+        time.sleep(3.0)
+        
+        #============PICK AND PLACE MEDICINE BOTTLE (marker 7)=================
+        if not self.execute_pick_pour_place_sequence(8, self.convert_serving_area_to_pose(8, self.serving_area[3]), pour_angle_degree=-45):
+            self.get_logger().error(f"Failed to prepare medicine bottle - pick and place failed")
             return False
-        self.get_logger().info("Medicine bottle placed successfully, medicine preparation completed!")
+        self.get_logger().info(f"Medicine bottle placed successfully, medicine preparation completed!")
         return True
+
+    def organize_books(self):
+        """Organize books by picking and placing them in bookshelf compartments"""
+        if 9 not in self.detected_objects:
+            self.get_logger().error("Book (marker 9) not detected!")
+            return False
+        
+        self.get_logger().info("Starting book organization...")
+        
+        # Get bookshelf compartment position (left compartment)
+        compartment_pos = self.get_bookshelf_compartment_position(compartment_index=0)
+        
+        # Create place pose
+        book_place_pose = Pose()
+        book_place_pose.position.x = compartment_pos[0]
+        book_place_pose.position.y = compartment_pos[1]
+        book_place_pose.position.z = compartment_pos[2] + self.detected_objects[9]['height'] / 2.0  # Adjust for book height
+        book_place_pose.orientation.w = 1.0
+        
+        self.get_logger().info(
+            f"Placing book in bookshelf compartment at: "
+            f"x={book_place_pose.position.x:.3f}, "
+            f"y={book_place_pose.position.y:.3f}, "
+            f"z={book_place_pose.position.z:.3f}")
+        
+        if not self.execute_pick_and_place_sequence(9, place_pose=book_place_pose):
+            self.get_logger().error("Failed to organize books - book pick and place failed")
+            return False
+        
+        self.get_logger().info("✓ Book placed in bookshelf successfully!")
+        self.get_logger().info("✓ Book organization completed!")
+        return True
+
 
 
 def main(args=None):
@@ -644,6 +1101,7 @@ def main(args=None):
     # Wait for valid pose before executing
     if controller.wait_for_valid_pose(timeout=15.0):
         controller.display_detected_objects()
+        # controller.organize_books()
         
         controller.prepare_medicine()        
     else:
