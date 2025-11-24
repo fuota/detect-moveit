@@ -135,7 +135,7 @@ OBJECT_MAP_EXTENDED = {
         'name': 'bookshelf',
         'type': 'mesh',
         'is_static': True,  # Static object - only add once, don't update
-        'aruco_offset': (-0.0975, -0.035, 0.0),  # TODO: Measure actual offset
+        'aruco_offset': (-0.065, -0.04875, 0.0),  # TODO: Measure actual offset
         'mesh_file': 'shelf.stl',
         'mesh_scale': 0.001,
         'bookshelf_params': (0.05, 0.195, 0.14)  # shelf_height, shelf_depth, shelf_width (for compartment calculations)
@@ -647,7 +647,7 @@ class RealDetectionPickPlaceController(MoveItController):
         
         obj_data = self.detected_objects.get(marker_id)
         if not obj_data or not obj_data.get('pose'):
-            self.get_logger().error("No pose data available!")
+            self.get_logger().error(f"No pose data available for marker {marker_id}!")
             self.is_moving = False
             return False
         
@@ -1199,26 +1199,16 @@ class RealDetectionPickPlaceController(MoveItController):
         Returns:
             tuple: (x, y, z) position in base_link frame
         """
-        # Check if bookshelf was detected (marker ID 2)
-        bookshelf_marker_id = 2
+        # Check if bookshelf was detected (marker ID 20)
+        bookshelf_marker_id = 20
         if bookshelf_marker_id in self.detected_objects and self.detected_objects[bookshelf_marker_id]['pose'] is not None:
             # Use detected bookshelf position
-            bookshelf_pose = self.detected_objects[bookshelf_marker_id]['pose']
-            bookshelf_x = bookshelf_pose.position.x   # Back board center X
-            bookshelf_y = bookshelf_pose.position.y  # Back board Y position
-            bookshelf_z_center = bookshelf_pose.position.z
-            
+            aruco_pose = self.detected_objects[bookshelf_marker_id]['pose']
             # Get bookshelf dimensions from config
             shelf_params = OBJECT_MAP_EXTENDED[bookshelf_marker_id]['bookshelf_params']
             shelf_height = shelf_params[0]
             shelf_depth = shelf_params[1]
             shelf_width = shelf_params[2]
-            
-            # Calculate base z position
-            bookshelf_z = bookshelf_z_center - shelf_height / 2.0
-            
-            self.get_logger().debug(
-                f"Using detected bookshelf at: x={bookshelf_x:.3f}, y={bookshelf_y:.3f}, z={bookshelf_z:.3f}")
         else:
             # Fallback to hardcoded position if bookshelf not detected
             self.get_logger().warn("Bookshelf not detected, using default position")
@@ -1228,25 +1218,41 @@ class RealDetectionPickPlaceController(MoveItController):
             shelf_depth = 0.15
             shelf_width = 0.25
         
-        base_thickness = 0.02
+        back_divider_thickness = 0.005
+        base_thickness = 0.003
         
         # Calculate compartment positions
         # X: Center of back board (same for all compartments)
-        x_pos = bookshelf_x
-        
-        # Y: Center of each compartment (compartments extend in -Y direction)
-        # Compartment 0 (first): between back and middle divider
-        # Compartment 1 (second): between middle divider and front
-        compartment_depth = shelf_depth / 2.0  # Each compartment is half the depth
-        if compartment_index == 0:  # First compartment (near back)
-            y_pos = bookshelf_y - shelf_depth / 4.0  # Center of first half
-        else:  # Second compartment (in -Y direction)
-            y_pos = bookshelf_y - 3.0 * shelf_depth / 4.0  # Center of second half
-        
-        # Z: On top of base
-        z_pos = bookshelf_z + base_thickness / 2.0
-        
+        x_pos = aruco_pose.position.x + back_divider_thickness - shelf_width 
+        y_pos = aruco_pose.position.y - (shelf_depth / 2.0)*compartment_index
+        z_pos = aruco_pose.position.z - shelf_height / 2.0 + base_thickness
+         
         return (x_pos, y_pos, z_pos)
+
+    def get_bookshelf_compartment_pose(self, marker_id, compartment_index=0):
+        """
+        Get position for placing books in bookshelf compartments.
+        Uses detected bookshelf position if available (marker ID 2).
+        
+        Args:
+            marker_id: ArUco marker ID
+            compartment_index: 0 for first compartment (near back), 1 for second compartment (in -Y)
+        """
+        compartment_position = self.get_bookshelf_compartment_position(compartment_index=compartment_index)
+        object_data = OBJECT_MAP_EXTENDED.get(marker_id)
+        if object_data.get('type') == 'cylinder':
+            gripper_z = object_data.get('cylinder_params')[1] / 2.0
+        elif object_data.get('type') == 'mesh':
+            gripper_z = object_data.get('handle_params')[1] / 2.0
+        else:
+            gripper_z = 0.0
+           
+        pose = Pose()
+        pose.position.x = compartment_position[0]
+        pose.position.y = compartment_position[1]
+        pose.position.z = compartment_position[2] + gripper_z
+        pose.orientation.w = 1.0
+        return pose
 
     def prepare_medicine(self):
         """Prepare medicine by picking and placing the medicine bottle"""
@@ -1311,32 +1317,40 @@ class RealDetectionPickPlaceController(MoveItController):
 
     def organize_books(self):
         """Organize books by picking and placing them in bookshelf compartments"""
-        if 9 not in self.detected_objects:
-            self.get_logger().error("Book (marker 9) not detected!")
+
+        if 20 not in self.detected_objects:
+            self.get_logger().error("Bookshelf (marker 20) not detected!")
             return False
+
         
         self.get_logger().info("Starting book organization...")
         
         # Get bookshelf compartment position (left compartment)
-        compartment_pos = self.get_bookshelf_compartment_position(compartment_index=0)
-        
-        # Create place pose
-        book_place_pose = Pose()
-        book_place_pose.position.x = compartment_pos[0]
-        book_place_pose.position.y = compartment_pos[1]
-        book_place_pose.position.z = compartment_pos[2] + self.detected_objects[9]['height'] / 2.0  # Adjust for book height
-        book_place_pose.orientation.w = 1.0
-        
+        compartment1_place_pose = self.get_bookshelf_compartment_pose(21, compartment_index=0)
+        compartment2_place_pose = self.get_bookshelf_compartment_pose(22, compartment_index=1)
+
         self.get_logger().info(
-            f"Placing book in bookshelf compartment at: "
-            f"x={book_place_pose.position.x:.3f}, "
-            f"y={book_place_pose.position.y:.3f}, "
-            f"z={book_place_pose.position.z:.3f}")
+            f"Placing book in bookshelf compartment 1 at: "
+            f"x={compartment1_place_pose.position.x:.3f}, "
+            f"y={compartment1_place_pose.position.y:.3f}, "
+            f"z={compartment1_place_pose.position.z:.3f}")
         
-        if not self.execute_pick_and_place_sequence(9, place_pose=book_place_pose):
+        if not self.execute_pick_and_place_sequence(21, place_pose=compartment1_place_pose):
             self.get_logger().error("Failed to organize books - book pick and place failed")
             return False
+
+        time.sleep(3.0)
+
+        self.get_logger().info(
+            f"Placing book in bookshelf compartment 2 at: "
+            f"x={compartment2_place_pose.position.x:.3f}, "
+            f"y={compartment2_place_pose.position.y:.3f}, "
+            f"z={compartment2_place_pose.position.z:.3f}")
         
+        if not self.execute_pick_and_place_sequence(22, place_pose=compartment2_place_pose):
+            self.get_logger().error("Failed to organize books - book pick and place failed")
+            return False
+        time.sleep(3.0)
         self.get_logger().info("✓ Book placed in bookshelf successfully!")
         self.get_logger().info("✓ Book organization completed!")
         return True
@@ -1354,9 +1368,9 @@ def main(args=None):
     # Wait for valid pose before executing
     if controller.wait_for_valid_pose(timeout=15.0):
         controller.display_detected_objects()
-        # controller.organize_books()
+        controller.organize_books()
         
-        controller.prepare_medicine()        
+        # controller.prepare_medicine()        
     else:
         controller.get_logger().error("Failed to receive valid pose - aborting")
     
