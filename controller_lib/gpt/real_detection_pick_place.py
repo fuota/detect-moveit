@@ -140,6 +140,16 @@ OBJECT_MAP_EXTENDED = {
         'handle_params': (0.029, 0.093),  # handle_radius, handle_height
         'total_height': 0.12,
     },
+
+    17: {
+        'name': 'spoon_cereal',
+        'type': 'mesh',
+        'aruco_offset': (0.018755, 0.063, 0.0),  # TODO: Measure actual offset from ArUco to mesh center
+        'mesh_file': 'spoon.stl',
+        'mesh_scale': 0.001,
+        'handle_params': (0.018755, 0.1),  # handle_radius, handle_height
+        'total_height': 0.1,
+    },
     
     20: {
         'name': 'bookshelf',
@@ -227,8 +237,8 @@ class RealDetectionPickPlaceController(MoveItController):
                 ],
                 'estimated_duration_seconds': 120
             },
-            'setup_tableware': {
-                'name': 'Setup Tableware',
+            'set_up_table': {
+                'name': 'Set Up Table',
                 'description': 'Places bowl, fork, and spoon in serving areas',
                 'total_steps': 3,
                 'steps': [
@@ -280,11 +290,11 @@ class RealDetectionPickPlaceController(MoveItController):
             callback_group=self.callback_group
         )
         
-        # Create service for tableware setup
-        self.setup_tableware_service = self.create_service(
+        # Create service for table setup
+        self.set_up_table_service = self.create_service(
             Trigger,
-            'setup_tableware',
-            self.setup_tableware_service_callback,
+            'set_up_table',
+            self.set_up_table_service_callback,
             callback_group=self.callback_group
         )
         
@@ -306,7 +316,7 @@ class RealDetectionPickPlaceController(MoveItController):
         
         self.get_logger().info("Services available:")
         self.get_logger().info("  - /prepare_medicine")
-        self.get_logger().info("  - /setup_tableware")
+        self.get_logger().info("  - /set_up_table")
         self.get_logger().info("  - /organize_books")
         self.get_logger().info("  - /get_available_tasks (returns task info)")
         self.get_logger().info("Progress topic:")
@@ -357,17 +367,17 @@ class RealDetectionPickPlaceController(MoveItController):
         
         return response
     
-    def setup_tableware_service_callback(self, request, response):
-        """Service callback to trigger tableware setup"""
-        self.get_logger().info("Received tableware setup request from frontend")
+    def set_up_table_service_callback(self, request, response):
+        """Service callback to trigger table setup"""
+        self.get_logger().info("Received table setup request from frontend")
         
-        success = self.set_up_tableware()
+        success = self.set_up_table()
         
         response.success = success
         if success:
-            response.message = "Tableware setup completed successfully"
+            response.message = "Table setup completed successfully"
         else:
-            response.message = "Tableware setup failed"
+            response.message = "Table setup failed"
         
         return response
     
@@ -1565,16 +1575,16 @@ class RealDetectionPickPlaceController(MoveItController):
         self.publish_task_progress(task_name, 2, total_steps, "Book organization completed", "completed")
         return True
 
-    def set_up_tableware(self):
-        """Set up tableware by picking and placing the tableware in the serving area"""
-        self.get_logger().info("Starting tableware setup...")
-        task_name = "setup_tableware"
+    def set_up_table(self):
+        """Set up table by picking and placing the tableware in the serving area"""
+        self.get_logger().info("Starting table setup...")
+        task_name = "set_up_table"
         total_steps = 3
 
         #============STEP 1: PICK AND PLACE BOWL (marker 11)=================
         self.publish_task_progress(task_name, 1, total_steps, "Placing bowl", "in_progress")
         if not self.execute_pick_and_place_sequence(11, self.get_setup_table_serving_area_pose(11, 1)):
-            self.get_logger().error("Failed to set up tableware - bowl pick and place failed")
+            self.get_logger().error("Failed to set up table - bowl pick and place failed")
             self.publish_task_progress(task_name, 1, total_steps, "Placing bowl", "failed")
             return False
         
@@ -1584,7 +1594,7 @@ class RealDetectionPickPlaceController(MoveItController):
         #============STEP 2: PICK AND PLACE FORK (marker 12)=================
         self.publish_task_progress(task_name, 2, total_steps, "Placing fork", "in_progress")
         if not self.execute_pick_and_place_sequence(12, self.get_setup_table_serving_area_pose(12, 0)):
-            self.get_logger().error("Failed to set up tableware - fork pick and place failed")
+            self.get_logger().error("Failed to set up table - fork pick and place failed")
             self.publish_task_progress(task_name, 2, total_steps, "Placing fork", "failed")
             return False
         
@@ -1594,13 +1604,13 @@ class RealDetectionPickPlaceController(MoveItController):
         #============STEP 3: PICK AND PLACE SPOON (marker 13)=================
         self.publish_task_progress(task_name, 3, total_steps, "Placing spoon", "in_progress")
         if not self.execute_pick_and_place_sequence(13, self.get_setup_table_serving_area_pose(13, 2)):
-            self.get_logger().error("Failed to set up tableware - spoon pick and place failed")
+            self.get_logger().error("Failed to set up table - spoon pick and place failed")
             self.publish_task_progress(task_name, 3, total_steps, "Placing spoon", "failed")
             return False
         
         time.sleep(3.0)
-        self.get_logger().info("✓ Tableware setup completed!")
-        self.publish_task_progress(task_name, 3, total_steps, "Tableware setup completed", "completed")
+        self.get_logger().info("✓ Table setup completed!")
+        self.publish_task_progress(task_name, 3, total_steps, "Table setup completed", "completed")
         return True
 
 def main(args=None):
@@ -1614,7 +1624,7 @@ def main(args=None):
     # Wait for valid pose before executing
     if controller.wait_for_valid_pose(timeout=15.0):
         controller.display_detected_objects()
-        # controller.set_up_tableware()
+        # controller.set_up_table()
         # controller.prepare_medicine() 
         # controller.organize_books()
        
