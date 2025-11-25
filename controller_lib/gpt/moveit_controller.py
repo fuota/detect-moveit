@@ -175,7 +175,7 @@ class MoveItController(Node, CollisionObjectMixin):
         robot_state.joint_state = self.current_joint_state
         return robot_state
     
-    def wait_for_joint_state(self, timeout=5.0, max_age=2.0, allow_stale=False):
+    def wait_for_joint_state(self, timeout=5.0, max_age=2.0, allow_stale=False, require_fresh=False):
         """
         Wait for joint state to be available and recent.
         
@@ -183,6 +183,7 @@ class MoveItController(Node, CollisionObjectMixin):
             timeout: Maximum time to wait for joint state (seconds)
             max_age: Maximum age of joint state to consider valid (seconds)
             allow_stale: If True, allow stale joint state (useful for recovery scenarios)
+            require_fresh: If True, MUST have fresh joint state (max_age must be met), ignore allow_stale
         
         Returns:
             bool: True if joint state is available and recent, False otherwise
@@ -191,6 +192,7 @@ class MoveItController(Node, CollisionObjectMixin):
             self.last_joint_state_time = None
         
         start_time = time.time()
+        check_count = 0
         while time.time() - start_time < timeout:
             if self.current_joint_state is not None:
                 if self.last_joint_state_time is not None:
@@ -198,13 +200,17 @@ class MoveItController(Node, CollisionObjectMixin):
                     if age <= max_age:
                         self.get_logger().debug(f"Joint state available (age: {age:.2f}s)")
                         return True
+                    elif require_fresh:
+                        # If require_fresh is True, don't accept stale states
+                        if check_count % 5 == 0:  # Log every 0.5s
+                            self.get_logger().warn(f"Waiting for fresh joint state (age: {age:.2f}s, max: {max_age}s)...")
                     elif allow_stale:
                         # Allow stale joint state if explicitly requested (for recovery)
                         self.get_logger().warn(f"Using stale joint state (age: {age:.2f}s) - hardware may be recovering")
                         return True
                     else:
                         # Only log warning, don't spam
-                        if int((time.time() - start_time) * 10) % 5 == 0:  # Log every 0.5s
+                        if check_count % 5 == 0:  # Log every 0.5s
                             self.get_logger().warn(f"Joint state too old (age: {age:.2f}s, max: {max_age}s)")
                 else:
                     # If we have joint state but no timestamp, assume it's recent
@@ -214,6 +220,22 @@ class MoveItController(Node, CollisionObjectMixin):
             # Spin to receive joint state messages
             rclpy.spin_once(self, timeout_sec=0.1)
             time.sleep(0.1)
+            check_count += 1
+        
+        # If require_fresh is True, never use stale states
+        if require_fresh:
+            if self.last_joint_state_time is not None:
+                age = time.time() - self.last_joint_state_time
+                self.get_logger().error(
+                    f"Fresh joint state not available after {timeout}s - hardware driver may be down. "
+                    f"Latest state age: {age:.1f}s (needs to be < {max_age}s)"
+                )
+            else:
+                self.get_logger().error(
+                    f"Fresh joint state not available after {timeout}s - hardware driver may be down. "
+                    f"No joint state received yet."
+                )
+            return False
         
         # If we have joint state but it's stale, and allow_stale is True, use it anyway
         if allow_stale and self.current_joint_state is not None:
@@ -222,6 +244,45 @@ class MoveItController(Node, CollisionObjectMixin):
         
         self.get_logger().error(f"Joint state not available after {timeout}s - hardware may be unresponsive")
         return False
+    
+    def wait_for_fresh_joint_state(self, timeout=10.0, max_age=0.5):
+        """
+        Wait for fresh joint state (strict requirement - must be very recent).
+        This is required before MoveIt operations to ensure trajectory validation works.
+        
+        Args:
+            timeout: Maximum time to wait (seconds)
+            max_age: Maximum age of joint state (seconds) - should be < 1s for MoveIt
+        
+        Returns:
+            bool: True if fresh joint state available, False otherwise
+        """
+        return self.wait_for_joint_state(timeout=timeout, max_age=max_age, allow_stale=False, require_fresh=True)
+    
+    def check_hardware_status(self):
+        """
+        Check if hardware driver is responsive by checking joint state freshness.
+        
+        Returns:
+            tuple: (is_ok, age_seconds, status_message)
+                - is_ok: True if hardware is responsive
+                - age_seconds: Age of latest joint state in seconds (None if no state)
+                - status_message: Human-readable status message
+        """
+        if self.current_joint_state is None:
+            return (False, None, "No joint state received - hardware driver may not be running")
+        
+        if self.last_joint_state_time is None:
+            return (False, None, "Joint state received but timestamp unavailable")
+        
+        age = time.time() - self.last_joint_state_time
+        
+        if age > 5.0:
+            return (False, age, f"Hardware driver appears to be down - joint state is {age:.1f}s old")
+        elif age > 1.0:
+            return (False, age, f"Hardware driver may be having issues - joint state is {age:.1f}s old")
+        else:
+            return (True, age, f"Hardware driver is responsive - joint state is {age:.2f}s old")
     
     # ==================== POSE UTILITIES ====================
     
@@ -370,11 +431,15 @@ class MoveItController(Node, CollisionObjectMixin):
     
     def move_to_pose(self, target_pose, planning_time=7.0, max_retries=5):
         """Move arm to target pose; auto-retry if MoveIt returns INVALID_MOTION_PLAN."""
-        # CRITICAL: Check if joint state is available before planning
-        # If hardware driver crashed, joint states won't be available
-        # Use allow_stale=True to allow recovery from temporary hardware issues
-        if not self.wait_for_joint_state(timeout=3.0, max_age=5.0, allow_stale=True):
-            self.get_logger().error("Cannot plan motion - joint state not available. Hardware driver may have crashed.")
+        # CRITICAL: Wait for FRESH joint state before planning
+        # MoveIt requires joint states < 1 second old for trajectory validation
+        # If hardware driver is down, this will fail early with clear error
+        if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=0.5):
+            self.get_logger().error(
+                "Cannot plan motion - fresh joint state not available. "
+                "Hardware driver may be down or robot communication lost. "
+                "Please restart the robot launch file."
+            )
             return False
         
         # Adjust parameters for Pilz planners (they need more time and attempts)
@@ -413,10 +478,10 @@ class MoveItController(Node, CollisionObjectMixin):
             # Use slower speeds for Pilz LIN to improve success rate
             if is_pilz_lin:
                 goal.request.max_velocity_scaling_factor = 0.10
-                goal.request.max_acceleration_scaling_factor = 0.10
+                goal.request.max_acceleration_scaling_factor = 0.3
             else:
                 goal.request.max_velocity_scaling_factor = 0.15
-                goal.request.max_acceleration_scaling_factor = 0.15
+                goal.request.max_acceleration_scaling_factor = 0.3
 
             # 👉 Set start state (current joint state) to help IK solver
             # This significantly improves IK success rate, especially for Pilz planners
@@ -574,10 +639,14 @@ class MoveItController(Node, CollisionObjectMixin):
         Returns:
             bool: True if successful
         """
-        # CRITICAL: Check if joint state is available before planning
-        # Use allow_stale=True to allow recovery from temporary hardware issues
-        if not self.wait_for_joint_state(timeout=3.0, max_age=5.0, allow_stale=True):
-            self.get_logger().error("Cannot plan motion - joint state not available. Hardware driver may have crashed.")
+        # CRITICAL: Wait for FRESH joint state before planning
+        # MoveIt requires joint states < 1 second old for trajectory validation
+        if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=0.5):
+            self.get_logger().error(
+                "Cannot plan motion - fresh joint state not available. "
+                "Hardware driver may be down or robot communication lost. "
+                "Please restart the robot launch file."
+            )
             return False
         
         if len(joint_positions) != 7:
@@ -892,13 +961,21 @@ class MoveItController(Node, CollisionObjectMixin):
         """
         self.get_logger().info("Executing Cartesian trajectory...")
         
+        # CRITICAL: Check hardware is responsive before executing trajectory
+        if not self.wait_for_fresh_joint_state(timeout=3.0, max_age=0.5):
+            self.get_logger().error(
+                "Cannot execute trajectory - fresh joint state not available. "
+                "Hardware driver may be down."
+            )
+            return False
+        
         # Create goal
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = trajectory
         
         # Send goal
         future = self.execute_trajectory_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=2.0)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         
         if not future.done():
             self.get_logger().error("Execute trajectory goal send timed out")
@@ -911,19 +988,60 @@ class MoveItController(Node, CollisionObjectMixin):
         
         self.get_logger().info("Trajectory execution started...")
         
-        # Wait for result
+        # CRITICAL: Calculate expected execution time and add buffer
+        # Trajectories can take longer than MoveIt expects, especially with slow velocities
+        if trajectory.joint_trajectory.points:
+            last_point = trajectory.joint_trajectory.points[-1]
+            if last_point.time_from_start:
+                expected_time = last_point.time_from_start.sec + last_point.time_from_start.nanosec / 1e9
+                timeout = max(expected_time * 2.0, 30.0)  # At least 2x expected time, minimum 30s
+            else:
+                timeout = 30.0  # Default timeout if no time info
+        else:
+            timeout = 30.0
+        
+        self.get_logger().info(f"Waiting for trajectory execution (timeout: {timeout:.1f}s)...")
+        
+        # Wait for result with longer timeout
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=timeout)
+        
+        if not result_future.done():
+            self.get_logger().error(
+                f"Trajectory execution timed out after {timeout:.1f}s. "
+                "Hardware driver may be experiencing timeouts. "
+                "Waiting for hardware to recover..."
+            )
+            # CRITICAL: Wait for hardware to recover after timeout
+            time.sleep(3.0)
+            if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
+                self.get_logger().error("Hardware driver not recovering after trajectory timeout")
+            return False
         
         result = result_future.result()
-        success = result.result.error_code.val == MoveItErrorCodes.SUCCESS
+        error_code = result.result.error_code.val
+        success = error_code == MoveItErrorCodes.SUCCESS
         
         if success:
             self.get_logger().info("✓ Cartesian trajectory executed successfully")
+            # CRITICAL: Brief wait after successful execution to let hardware stabilize
+            time.sleep(0.5)
+            return True
         else:
-            self.get_logger().error(f"✗ Trajectory execution failed: {result.result.error_code.val}")
-        
-        return success
+            code_str = self._error_to_string(error_code)
+            self.get_logger().error(f"Trajectory execution failed: {code_str} (code {error_code})")
+            
+            # CRITICAL: If trajectory was cancelled or timed out, wait for hardware recovery
+            if error_code in (-4, -6):  # INVALID_ROBOT_STATE or UNKNOWN
+                self.get_logger().warn(
+                    "Trajectory execution failed with hardware error. "
+                    "Waiting for hardware driver to recover..."
+                )
+                time.sleep(2.0)
+                if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
+                    self.get_logger().error("Hardware driver not recovering after trajectory failure")
+            
+            return False
     
     def move_relative_cartesian(self, delta_x=0.0, delta_y=0.0, delta_z=0.0, 
                             eef_step=0.01, jump_threshold=2.0):  # Increased from 0.005 and 0.0
@@ -963,6 +1081,52 @@ class MoveItController(Node, CollisionObjectMixin):
     
     def control_gripper(self, state, gripper_value=None):
         """Control gripper state (open/close)"""
+        # CRITICAL: Wait for hardware driver to stabilize before gripper operation
+        # The hardware driver often times out right after arm motions
+        self.get_logger().info("Waiting for hardware driver to stabilize before gripper operation...")
+        
+        # First, check current hardware status
+        is_ok, age, msg = self.check_hardware_status()
+        if not is_ok:
+            self.get_logger().warn(f"Hardware status before gripper: {msg}")
+        
+        # Give hardware driver time to recover from previous motion
+        # Spin during the wait to process any pending messages - use longer wait time
+        recovery_start = time.time()
+        recovery_time = 5.0  # Increased from 3.0s to 5.0s for more reliable recovery
+        while time.time() - recovery_start < recovery_time:
+            rclpy.spin_once(self, timeout_sec=0.1)
+            time.sleep(0.1)
+        
+        # CRITICAL: Wait for fresh joint states before gripper operation
+        # Gripper operations fail with error -4 if joint states are stale
+        # Use max_age of 1.0s to match MoveIt's requirement
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            self.get_logger().info(f"Checking for fresh joint states (attempt {attempt + 1}/{max_attempts})...")
+            
+            # Use max_age of 1.0s - MoveIt requires states within 1 second
+            if self.wait_for_fresh_joint_state(timeout=10.0, max_age=1.0):
+                self.get_logger().info("✓ Hardware ready, proceeding with gripper operation")
+                break
+            
+            if attempt < max_attempts - 1:
+                self.get_logger().warn(
+                    f"Fresh joint state not available yet (attempt {attempt + 1}), "
+                    f"waiting longer for hardware to recover..."
+                )
+                # Spin more aggressively to receive messages
+                for _ in range(50):  # 5 seconds of spinning
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                    time.sleep(0.1)
+            else:
+                self.get_logger().error(
+                    "Cannot control gripper - fresh joint state not available after multiple attempts. "
+                    "Hardware driver may be down or experiencing persistent timeouts. "
+                    "Please check robot connection and consider restarting the robot launch file."
+                )
+                return False
+        
         gripper_client = ActionClient(self, MoveGroup, '/move_action')
         
         if not gripper_client.wait_for_server(timeout_sec=5.0):
@@ -1007,6 +1171,28 @@ class MoveItController(Node, CollisionObjectMixin):
         
         goal.request.goal_constraints.append(constraints)
         
+        # CRITICAL: Final check right before sending goal - states can become stale during planning
+        self.get_logger().info("Final check: Verifying joint states are still fresh before sending gripper goal...")
+        # Use max_age of 1.0s to match MoveIt's requirement
+        if not self.wait_for_fresh_joint_state(timeout=3.0, max_age=1.0):
+            self.get_logger().warn(
+                "Joint states became stale, waiting for hardware to recover..."
+            )
+            # Try one more recovery
+            for _ in range(30):  # 3 seconds of spinning
+                rclpy.spin_once(self, timeout_sec=0.1)
+                time.sleep(0.1)
+            
+            if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
+                self.get_logger().error(
+                    "Joint states still stale after recovery attempt. "
+                    "Hardware driver may be experiencing timeouts. Aborting gripper operation."
+                )
+                gripper_client.destroy()
+                return False
+        
+        self.get_logger().info("✓ Joint states confirmed fresh, sending gripper goal...")
+        
         future = gripper_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         
@@ -1020,6 +1206,20 @@ class MoveItController(Node, CollisionObjectMixin):
             self.get_logger().error("Gripper goal rejected")
             gripper_client.destroy()
             return False
+        
+        # CRITICAL: Check again right before execution - hardware can timeout during planning
+        self.get_logger().info("Verifying hardware is still responsive before gripper execution...")
+        time.sleep(1.0)  # Brief pause - increased from 0.5s
+        # Use max_age of 1.0s to match MoveIt's requirement
+        if not self.wait_for_fresh_joint_state(timeout=3.0, max_age=1.0):
+            self.get_logger().warn(
+                "Joint states became stale during gripper planning. "
+                "Hardware driver may be timing out. Attempting recovery..."
+            )
+            # Try to recover
+            for _ in range(30):  # 3 seconds of spinning
+                rclpy.spin_once(self, timeout_sec=0.1)
+                time.sleep(0.1)
         
         # CRITICAL: Increase timeout for gripper execution - grippers can take 10+ seconds
         result_future = goal_handle.get_result_async()
@@ -1035,9 +1235,20 @@ class MoveItController(Node, CollisionObjectMixin):
         
         error_code = result.result.error_code.val
         if error_code == MoveItErrorCodes.SUCCESS:
+            # CRITICAL: Brief wait after successful gripper operation to let hardware stabilize
+            self.get_logger().info("Gripper operation successful, waiting for hardware to stabilize...")
+            time.sleep(1.0)
             return True
         else:
-            self.get_logger().error(f"Gripper operation failed with error code: {error_code}")
+            # Error code -4 means INVALID_ROBOT_STATE - joint states were stale
+            if error_code == -4:
+                self.get_logger().error(
+                    f"Gripper operation failed with error code -4 (INVALID_ROBOT_STATE). "
+                    f"This indicates joint states became stale during execution. "
+                    f"Hardware driver may have timed out. Please check robot connection."
+                )
+            else:
+                self.get_logger().error(f"Gripper operation failed with error code: {error_code}")
             return False
     
     def open_gripper(self, openness=0.0):
@@ -1135,6 +1346,10 @@ class MoveItController(Node, CollisionObjectMixin):
                 return False
         self.use_default_planner()
         self.get_logger().info("✓ High-level PTP move successful")
+        
+        # CRITICAL: Wait for hardware to stabilize after motion
+        # Hardware driver often times out right after arm motions complete
+        time.sleep(1.0)
         return True
 
     def HIGH_LEVEL_move_lin(self, target_pose):
@@ -1151,10 +1366,29 @@ class MoveItController(Node, CollisionObjectMixin):
         if self.move_to_pose(target_pose):
             self.use_default_planner()
             self.get_logger().info("✓ High-level LIN move successful (Pilz LIN)")
+            
+            # CRITICAL: Wait for hardware to stabilize after motion
+            time.sleep(1.0)
             return True
         
         # Try 2: Cartesian path planning (guaranteed linear trajectory)
         self.get_logger().info("Pilz LIN failed, trying Cartesian path planning for linear trajectory...")
+        
+        # CRITICAL: Check hardware is still responsive before attempting fallback
+        # Hardware may have timed out during Pilz LIN execution
+        self.get_logger().info("Checking hardware status before Cartesian fallback...")
+        is_ok, age, msg = self.check_hardware_status()
+        if not is_ok:
+            self.get_logger().warn(f"Hardware status: {msg}")
+            self.get_logger().info("Waiting for hardware to recover before Cartesian fallback...")
+            if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=0.5):
+                self.get_logger().error(
+                    "Hardware driver not responding - cannot attempt Cartesian fallback. "
+                    "Please restart the robot launch file."
+                )
+                self.use_default_planner()
+                return False
+        
         current_pose = self.get_current_pose()
         if current_pose is not None and self.cartesian_available:
             # Use Cartesian path with small step size for smooth linear motion
@@ -1180,12 +1414,16 @@ class MoveItController(Node, CollisionObjectMixin):
                                      avoid_collisions=avoid_coll):
                     self.use_default_planner()
                     self.get_logger().info(f"✓ High-level LIN move successful (Cartesian path - {desc})")
+                    # CRITICAL: Wait for hardware to stabilize after motion
+                    time.sleep(1.0)
                     return True
         
         # Try 3: Pilz PTP (joint-space fallback)
         self.get_logger().info("Cartesian path failed, trying Pilz PTP...")
         if self.HIGH_LEVEL_move_ptp(target_pose):
             self.get_logger().info("✓ High-level LIN move successful (Pilz PTP fallback)")
+            # CRITICAL: Wait for hardware to stabilize after motion
+            time.sleep(1.0)
             return True
         
         # All methods failed
@@ -1263,7 +1501,7 @@ class MoveItController(Node, CollisionObjectMixin):
 
     def pick_object(self, object_name, grasp_pose, approach_direction="side",
                     approach_distance=0.02, grasp_distance=0.015,
-                    lift_distance=0.2, grip_force=0.5):
+                    lift_distance=0.2, grip_force=0.85):
         """
         Execute complete pick operation using Pilz planners.
 
@@ -1282,7 +1520,7 @@ class MoveItController(Node, CollisionObjectMixin):
         Returns:
             bool: True if successful
         """
-        self.get_logger().info(f"Starting pick operation for '{object_name}'")
+        self.get_logger().info(f"Starting pick operation for '{object_name} with grip force {grip_force}'")
         approach_distance += self.GRIPPER_OUTER_LENGTH
 
         # Step 1: Compute and move to pre-grasp pose with PTP
@@ -1298,23 +1536,11 @@ class MoveItController(Node, CollisionObjectMixin):
         delta_y1 = approach_pose.position.y - self.get_current_pose().position.y
         delta_z1 = approach_pose.position.z - self.get_current_pose().position.z
 
-        if not self.HIGH_LEVEL_move_lin_relative(dx=delta_x1):
-            self.get_logger().error("Failed to do x axis movement first")
-            if not self.HIGH_LEVEL_move_lin(approach_pose):
-                self.get_logger().error("Failed to reach approach pose")
-                return False
-        elif not self.HIGH_LEVEL_move_lin_relative(dy=delta_y1):
-            self.get_logger().error("Failed to do y axis movement first")
-            if not self.HIGH_LEVEL_move_lin(approach_pose):
-                self.get_logger().error("Failed to reach approach pose")
-                return False
-        elif not self.HIGH_LEVEL_move_lin_relative(dz=delta_z1):
-            self.get_logger().error("Failed to do z axis movement first")
-            if not self.HIGH_LEVEL_move_lin(approach_pose):
-                self.get_logger().error("Failed to reach approach pose")
-                return False
-        else:
-            self.get_logger().info("Successfully moved to approach pose by x and y axis movement first")
+        if not self.HIGH_LEVEL_move_lin(approach_pose):
+            self.get_logger().error("Failed to reach approach pose")
+            return False
+            
+        self.get_logger().info("Successfully moved to approach pose")
 
         time.sleep(0.5)
 
@@ -1373,6 +1599,111 @@ class MoveItController(Node, CollisionObjectMixin):
         self.get_logger().info("✓ Pick operation completed successfully")
         return True
 
+
+    def lin_pick_object(self, object_name, grasp_pose, approach_direction="side",
+                    approach_distance=0.02, grasp_distance=0.015,
+                    lift_distance=0.2, grip_force=0.85):
+        """
+        Execute complete pick operation using Pilz planners.
+
+        For side grasp: we approach along -X (base frame) from a pre-grasp,
+        then slide in along +X to grasp the body.
+
+        Args:
+            object_name: Name of object to pick (collision id)
+            grasp_pose: Pose of object / grasp point (in base frame)
+            approach_direction: currently only "side" supported
+            approach_distance: distance BEFORE contact (m)
+            grasp_distance: how deep to go past pre-grasp (m)
+            lift_distance: vertical lift after grasp (m)
+            grip_force: gripper closing effort (0.0-1.0)
+
+        Returns:
+            bool: True if successful
+        """
+        self.get_logger().info(f"Starting pick operation for '{object_name}'")
+        approach_distance += self.GRIPPER_OUTER_LENGTH
+
+        # Step 1: Compute and move to pre-grasp pose with PTP
+        approach_pose = self.compute_approach_pose(
+            grasp_pose, distance=approach_distance, direction=approach_direction)
+
+        self.get_logger().info(
+            f"Step 1: Moving to approach pose (Pilz PTP) -> "
+            f"{approach_pose.position.x:.3f}, {approach_pose.position.y:.3f}, {approach_pose.position.z:.3f}"
+        )
+
+        delta_x1 = approach_pose.position.x - self.get_current_pose().position.x
+        delta_y1 = approach_pose.position.y - self.get_current_pose().position.y
+        delta_z1 = approach_pose.position.z - self.get_current_pose().position.z
+
+        if not self.HIGH_LEVEL_move_lin_relative(dy=delta_y1):
+            if not self.HIGH_LEVEL_move_lin(approach_pose):
+                self.get_logger().error("Failed to reach approach pose")
+                return False
+        elif not self.HIGH_LEVEL_move_lin_relative(dx=delta_x1, dz=delta_z1):
+            if not self.HIGH_LEVEL_move_lin(approach_pose):
+                self.get_logger().error("Failed to reach approach pose")
+                return False
+            
+        self.get_logger().info("Successfully moved to approach pose")
+
+        time.sleep(0.5)
+
+        # Step 2: Open gripper
+        self.get_logger().info("Step 2: Opening gripper...")
+        if not self.open_gripper():
+            self.get_logger().error("Failed to open gripper")
+            return False
+        time.sleep(2.0)  # Increased wait for gripper to fully open
+
+        # Step 4: Remove and attach object to gripper
+        self.get_logger().info("Step 4: Attaching object to gripper for collision avoidance...")
+        if not self.attach_object_to_gripper(object_name):
+            self.get_logger().error("Failed to attach object")
+            return False
+        time.sleep(1.0)
+
+        # Step 3: Pilz LIN side-approach towards object
+        delta_x = approach_distance - (self.GRIPPER_INNER_LENGTH + grasp_distance)
+        delta_z = 0.0
+
+        current_pose = self.get_current_pose()
+        if current_pose:
+            self.get_logger().info(
+                f"Step 3: Approaching object using Pilz LIN "
+                f"(delta_x={delta_x:.3f}m, delta_z={delta_z:.3f}m)"
+            )
+            self.get_logger().info(
+                f"  Current gripper tip approx: "
+                f"{current_pose.position.x + self.GRIPPER_INNER_LENGTH:.3f}, "
+                f"{current_pose.position.y:.3f}, {current_pose.position.z:.3f}"
+            )
+        else:
+            self.get_logger().warn("Failed to get current pose before LIN approach")
+
+        if not self.HIGH_LEVEL_move_lin_relative(dx=delta_x, dz=delta_z):
+            self.get_logger().error("Failed to approach object")
+            return False
+        time.sleep(0.5)
+
+
+        # Step 5: Close gripper to grasp
+        self.get_logger().info("Step 5: Closing gripper...")
+        if not self.close_gripper(grip_force):
+            self.get_logger().error("Failed to close gripper")
+            return False
+        time.sleep(2.0)  # Increased wait for gripper to fully close and grasp
+
+        # Step 6: Lift vertically using Pilz LIN
+        self.get_logger().info(f"Step 6: Lifting object using Pilz LIN ({lift_distance} m)...")
+        if not self.HIGH_LEVEL_move_lin_relative(dz=lift_distance):
+            self.get_logger().error("Failed to lift object")
+            return False
+        time.sleep(0.5)
+        
+        self.get_logger().info("✓ Pick operation completed successfully")
+        return True
 
     def place_object_with_start(self, object_name, start_pose, place_pose, retreat_distance_x=0.07, retreat_distance_z=0.15):
         """

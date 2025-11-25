@@ -113,7 +113,7 @@ class CollisionObjectMixin:
         time.sleep(0.5)
         
         self.collision_objects_added.add(name)
-        self.get_logger().info(f"✓ Cylinder '{name}' added")
+        self.get_logger().info(f"✓ Cylinder '{name}' added with size {radius:.3f}m, {height:.3f}m")
         return True
     
     def add_book_collision_object(self, name, spine_center_x, spine_center_y, spine_center_z,
@@ -268,16 +268,16 @@ class CollisionObjectMixin:
                 center_y = (min_y + max_y) / 2.0
                 center_z = (min_z + max_z) / 2.0
                 
-                self.get_logger().info(
-                    f"Loaded STL: {num_triangles} triangles, {len(vertices)} unique vertices")
-                self.get_logger().info(
-                    f"STL dimensions (raw units): "
-                    f"X={size_x:.3f}, Y={size_y:.3f}, Z={size_z:.3f}")
-                self.get_logger().info(
-                    f"Bounding box: X[{min_x:.3f}, {max_x:.3f}], "
-                    f"Y[{min_y:.3f}, {max_y:.3f}], Z[{min_z:.3f}, {max_z:.3f}]")
-                self.get_logger().info(
-                    f"Bounding box center: ({center_x:.3f}, {center_y:.3f}, {center_z:.3f})")
+                # self.get_logger().info(
+                #     f"Loaded STL: {num_triangles} triangles, {len(vertices)} unique vertices")
+                # self.get_logger().info(
+                #     f"STL dimensions (raw units): "
+                self.get_logger().info(f"X={size_x:.3f}, Y={size_y:.3f}, Z={size_z:.3f}")
+                # self.get_logger().info(
+                #     f"Bounding box: X[{min_x:.3f}, {max_x:.3f}], "
+                #     f"Y[{min_y:.3f}, {max_y:.3f}], Z[{min_z:.3f}, {max_z:.3f}]")
+                # self.get_logger().info(
+                #     f"Bounding box center: ({center_x:.3f}, {center_y:.3f}, {center_z:.3f})")
                 
                 return vertices, triangles, (center_x, center_y, center_z)
                 
