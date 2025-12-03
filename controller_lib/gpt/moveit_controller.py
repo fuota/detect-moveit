@@ -245,10 +245,11 @@ class MoveItController(Node, CollisionObjectMixin):
         self.get_logger().error(f"Joint state not available after {timeout}s - hardware may be unresponsive")
         return False
     
-    def wait_for_fresh_joint_state(self, timeout=10.0, max_age=0.5):
+    def wait_for_fresh_joint_state(self, timeout=10.0, max_age=1.0):
         """
         Wait for fresh joint state (strict requirement - must be very recent).
         This is required before MoveIt operations to ensure trajectory validation works.
+        NOTE: MoveIt internally requires joint states within 1.0 seconds, so max_age should be <= 1.0.
         
         Args:
             timeout: Maximum time to wait (seconds)
@@ -434,7 +435,7 @@ class MoveItController(Node, CollisionObjectMixin):
         # CRITICAL: Wait for FRESH joint state before planning
         # MoveIt requires joint states < 1 second old for trajectory validation
         # If hardware driver is down, this will fail early with clear error
-        if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=0.5):
+        if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
             self.get_logger().error(
                 "Cannot plan motion - fresh joint state not available. "
                 "Hardware driver may be down or robot communication lost. "
@@ -565,17 +566,53 @@ class MoveItController(Node, CollisionObjectMixin):
                 self.get_logger().info("✓ Move completed successfully")
                 # CRITICAL: Wait for actual motion completion, not just planning success
                 # MoveIt returns SUCCESS when trajectory is sent, not when robot finishes
-                # Use shorter timeout and be more lenient to avoid hardware communication issues
                 try:
-                    if not self.wait_for_motion_completion(target_pose=target_pose, timeout=15.0, check_interval=0.5):
-                        self.get_logger().debug("Move reported success but pose verification timed out (this is usually OK)")
+                    # Increased timeout from 15s to 20s for slow hardware driver
+                    motion_complete = self.wait_for_motion_completion(target_pose=target_pose, timeout=20.0, check_interval=0.5)
+                    if not motion_complete:
+                        # Motion timed out - check if robot actually reached target
+                        self.get_logger().warn("Motion completion verification timed out, checking final position...")
+                        current_pose = self.get_current_pose()
+                        if current_pose is not None and target_pose is not None:
+                            pos_error = math.sqrt(
+                                (current_pose.position.x - target_pose.position.x)**2 +
+                                (current_pose.position.y - target_pose.position.y)**2 +
+                                (current_pose.position.z - target_pose.position.z)**2
+                            )
+                            if pos_error > 0.05:  # More than 5cm off target
+                                self.get_logger().error(
+                                    f"Robot did NOT reach target! Position error: {pos_error:.3f}m. "
+                                    f"Hardware driver may have crashed. Check ros2_control_node."
+                                )
+                                # Wait for hardware to potentially recover
+                                time.sleep(3.0)
+                                return False
+                            else:
+                                self.get_logger().info(f"Robot is close to target (error: {pos_error:.3f}m), continuing...")
+                        else:
+                            self.get_logger().warn("Could not verify final position, waiting for recovery...")
+                            # Don't fail immediately - give hardware time to recover
+                            time.sleep(3.0)
+                            # Try to continue if we can get fresh joint states
+                            if self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
+                                self.get_logger().info("Hardware recovered, continuing...")
+                            else:
+                                return False
                 except Exception as e:
-                    # Don't fail the move if pose verification has issues
-                    self.get_logger().debug(f"Pose verification had issues (non-critical): {e}")
+                    self.get_logger().warn(f"Pose verification had issues: {e}")
+                    # Try to get current pose to check if we're close
+                    time.sleep(1.0)
                 
-                # CRITICAL: Add small delay after motion to allow hardware driver to recover
+                # CRITICAL: Add delay after motion to allow hardware driver to recover
                 # The hardware driver may timeout during feedback refresh, so give it time
-                time.sleep(0.5)
+                # Increased from 0.5s to 1.0s
+                time.sleep(1.0)
+                
+                # Wait for fresh joint states before returning - this ensures the next
+                # operation doesn't fail due to stale states
+                for _ in range(20):  # 2 seconds of spinning
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                    time.sleep(0.1)
                 
                 return True
 
@@ -641,7 +678,7 @@ class MoveItController(Node, CollisionObjectMixin):
         """
         # CRITICAL: Wait for FRESH joint state before planning
         # MoveIt requires joint states < 1 second old for trajectory validation
-        if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=0.5):
+        if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
             self.get_logger().error(
                 "Cannot plan motion - fresh joint state not available. "
                 "Hardware driver may be down or robot communication lost. "
@@ -962,7 +999,7 @@ class MoveItController(Node, CollisionObjectMixin):
         self.get_logger().info("Executing Cartesian trajectory...")
         
         # CRITICAL: Check hardware is responsive before executing trajectory
-        if not self.wait_for_fresh_joint_state(timeout=3.0, max_age=0.5):
+        if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
             self.get_logger().error(
                 "Cannot execute trajectory - fresh joint state not available. "
                 "Hardware driver may be down."
@@ -1349,7 +1386,7 @@ class MoveItController(Node, CollisionObjectMixin):
         
         # CRITICAL: Wait for hardware to stabilize after motion
         # Hardware driver often times out right after arm motions complete
-        time.sleep(1.0)
+        time.sleep(2.0)
         return True
 
     def HIGH_LEVEL_move_lin(self, target_pose):
@@ -1368,7 +1405,7 @@ class MoveItController(Node, CollisionObjectMixin):
             self.get_logger().info("✓ High-level LIN move successful (Pilz LIN)")
             
             # CRITICAL: Wait for hardware to stabilize after motion
-            time.sleep(1.0)
+            time.sleep(2.0)
             return True
         
         # Try 2: Cartesian path planning (guaranteed linear trajectory)
@@ -1381,7 +1418,7 @@ class MoveItController(Node, CollisionObjectMixin):
         if not is_ok:
             self.get_logger().warn(f"Hardware status: {msg}")
             self.get_logger().info("Waiting for hardware to recover before Cartesian fallback...")
-            if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=0.5):
+            if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
                 self.get_logger().error(
                     "Hardware driver not responding - cannot attempt Cartesian fallback. "
                     "Please restart the robot launch file."
@@ -1415,7 +1452,7 @@ class MoveItController(Node, CollisionObjectMixin):
                     self.use_default_planner()
                     self.get_logger().info(f"✓ High-level LIN move successful (Cartesian path - {desc})")
                     # CRITICAL: Wait for hardware to stabilize after motion
-                    time.sleep(1.0)
+                    time.sleep(2.0)
                     return True
         
         # Try 3: Pilz PTP (joint-space fallback)
@@ -1423,7 +1460,7 @@ class MoveItController(Node, CollisionObjectMixin):
         if self.HIGH_LEVEL_move_ptp(target_pose):
             self.get_logger().info("✓ High-level LIN move successful (Pilz PTP fallback)")
             # CRITICAL: Wait for hardware to stabilize after motion
-            time.sleep(1.0)
+            time.sleep(2.0)
             return True
         
         # All methods failed
