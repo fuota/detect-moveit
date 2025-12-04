@@ -212,7 +212,7 @@ class RealDetectionPickPlaceController(MoveItController):
         # Workspace table parameters
         self.workspace_table = {
             'dx': 0.48,
-            'dy': -0.28,
+            'dy': -0.275,
             'dz': -0.37,
             'width': 0.55,
             'depth': 0.55,
@@ -473,7 +473,7 @@ class RealDetectionPickPlaceController(MoveItController):
                 msg.poses[i].position.x -= 0.010 #LAB CHANGE (11/25/2025 - organize books)
                 msg.poses[i].position.z -= 0.010 #LAB CHANGE (11/24/2025)
                 # msg.poses[i].position.y -= 0.03 #LAB CHANGE (11/24/2025 - prepare medicine)
-                msg.poses[i].position.y -= 0.030 #LAB CHANGE (11/24/2025 - organize books)
+                msg.poses[i].position.y -= 0.040 #LAB CHANGE (11/24/2025 - organize books)
                 self.detected_objects[marker_id]['pose'] = msg.poses[i]
                 # Only update collision if object is NOT picked and NOT moving
                 if marker_id not in self.picked_objects:
@@ -1035,7 +1035,7 @@ class RealDetectionPickPlaceController(MoveItController):
         grasp_distance = 0.02  # Meters from the gripper to the object after pick
         self.get_logger().info("===================== PICK PHASE ====================")
         # self.remove_collision_object(object_name)  # Remove existing collision to avoid interference
-        pick_success = self.lin_pick_object(object_name, object_pose, lift_distance=0.3, grasp_distance=grasp_distance, grip_force=grip_force)
+        pick_success = self.lin_pick_object(object_name, object_pose, grasp_distance=grasp_distance, grip_force=grip_force)
  
         if not pick_success:
             self.get_logger().error("✗ Pick operation failed!")
@@ -1099,7 +1099,7 @@ class RealDetectionPickPlaceController(MoveItController):
         
         return place_success
     
-    def execute_pick_pour_return_sequence(self, marker_id, target_pose, pour_angle_degree=45, offset_left=0.1):
+    def execute_pick_pour_return_sequence(self, marker_id, target_pose, pour_angle_degree=45, offset_left=0.1, retreat_distance=0.1):
         """
         Execute pick, move to left of target, pour, retreat, and return to original position sequence.
         
@@ -1136,7 +1136,7 @@ class RealDetectionPickPlaceController(MoveItController):
         # ==================== PICK PHASE ====================
         self.get_logger().info("===================== PICK PHASE ====================")
         original_object_pose.position.z = self.get_z_90(marker_id)
-        pick_success = self.lin_pick_object(object_name, original_object_pose, lift_distance=0.3, 
+        pick_success = self.lin_pick_object(object_name, original_object_pose,  
                                        grasp_distance=grasp_distance, grip_force=grip_force)
  
         if not pick_success:
@@ -1194,36 +1194,21 @@ class RealDetectionPickPlaceController(MoveItController):
                 self.is_moving = False
                 return False
             time.sleep(0.5)
-        # Move in X direction first
-        # if abs(dx) > 0.001:
-        #     if not self.HIGH_LEVEL_move_lin_relative(dx=dx):
-        #         self.get_logger().error("Failed to move to pour position (X)")
-        #         self.is_moving = False
-        #         return False
-        #     time.sleep(0.5)
-        
-        # # Move in Y direction
-        # if abs(dy) > 0.001:
-        #     if not self.HIGH_LEVEL_move_lin_relative(dy=dy):
-        #         self.get_logger().error("Failed to move to pour position (Y)")
-        #         self.is_moving = False
-        #         return False
-        #     time.sleep(0.5)
         
         # ==================== DESCEND TO POUR HEIGHT ====================
-        self.get_logger().info("==================== DESCEND TO POUR HEIGHT ====================")
-        z_pour = target_pose.position.z + 0.2
-        current_z = self.get_current_pose().position.z
-        dz = z_pour - current_z
+        # self.get_logger().info("==================== DESCEND TO POUR HEIGHT ====================")
+        # z_pour = target_pose.position.z + 0.2
+        # current_z = self.get_current_pose().position.z
+        # dz = z_pour - current_z
         
-        self.get_logger().info(
-            f"Descending to pour height: z_pour={z_pour:.3f}, current_z={current_z:.3f}, dz={dz:.3f}")
+        # self.get_logger().info(
+        #     f"Descending to pour height: z_pour={z_pour:.3f}, current_z={current_z:.3f}, dz={dz:.3f}")
         
-        if not self.HIGH_LEVEL_move_lin_relative(dz=dz):
-            self.get_logger().error("Failed to descend to pour height")
-            self.is_moving = False
-            return False
-        time.sleep(0.5)
+        # if not self.HIGH_LEVEL_move_lin_relative(dz=dz):
+        #     self.get_logger().error("Failed to descend to pour height")
+        #     self.is_moving = False
+        #     return False
+        # time.sleep(0.5)
         
         # ==================== POUR ====================
         self.get_logger().info("==================== POURING ====================")
@@ -1233,13 +1218,13 @@ class RealDetectionPickPlaceController(MoveItController):
             return False
         
         # ==================== RETREAT (LIFT UP) ====================
-        self.get_logger().info("==================== RETREAT (LIFT) ====================")
-        retreat_distance = 0.15
-        if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
-            self.get_logger().error("Failed to retreat upward")
-            self.is_moving = False
-            return False
-        time.sleep(0.5)
+        # self.get_logger().info("==================== RETREAT (LIFT) ====================")
+        # retreat_distance = 0.05
+        # if not self.HIGH_LEVEL_move_lin_relative(dz=retreat_distance):
+        #     self.get_logger().error("Failed to retreat upward")
+        #     self.is_moving = False
+        #     return False
+        # time.sleep(0.5)
         
         # ==================== RETURN TO ORIGINAL POSITION ====================
         self.get_logger().info("==================== RETURN TO ORIGINAL POSITION ====================")
@@ -1251,49 +1236,43 @@ class RealDetectionPickPlaceController(MoveItController):
             self.is_moving = False
             return False
         
-        # Calculate current object position
-        current_obj_x_after = current_after_pour.position.x + self.GRIPPER_INNER_LENGTH + grasp_distance
-        current_obj_y_after = current_after_pour.position.y
+        # # Calculate current object position
+        # current_obj_x_after = current_after_pour.position.x + self.GRIPPER_INNER_LENGTH + grasp_distance
+        # current_obj_y_after = current_after_pour.position.y
         
-        # Calculate movement back to original position
-        dx_return = original_object_pose.position.x - current_obj_x_after
-        dy_return = original_object_pose.position.y - current_obj_y_after
-        original_object_pose.position.z = current_after_pour.position.z
+        # # Calculate movement back to original position
+        # dx_return = original_object_pose.position.x - current_obj_x_after
+        # dy_return = original_object_pose.position.y - current_obj_y_after
+        # original_object_pose.position.z = current_after_pour.position.z
+
+
+        #CHANGE (12/04/2025)
+        dx_return = 0.15
+        dy_return = 0.015 if offset_left > 0 else -0.015    
+        return_pose = Pose()
+        return_pose.position.x = current_after_pour.position.x + dx_return
+        return_pose.position.y = current_after_pour.position.y + dy_return
+        return_pose.position.z = current_after_pour.position.z
         
         self.get_logger().info(
             f"Returning to original position: "
             f"original=({original_object_pose.position.x:.3f}, {original_object_pose.position.y:.3f}), "
-            f"current=({current_obj_x_after:.3f}, {current_obj_y_after:.3f}), "
+            f"current=({return_pose.position.x:.3f}, {return_pose.position.y:.3f}), "
             f"movement=({dx_return:.3f}, {dy_return:.3f})")
 
         if not self.HIGH_LEVEL_move_lin_relative(dy=dy_return):
-            if not self.HIGH_LEVEL_move_lin(original_object_pose):
+            if not self.HIGH_LEVEL_move_lin(return_pose):
                 self.get_logger().error("Failed to return to original position (X)")
                 self.is_moving = False
                 return False
             time.sleep(0.5)
         elif not self.HIGH_LEVEL_move_lin_relative(dx=dx_return):
-            if not self.HIGH_LEVEL_move_lin(original_object_pose):
+            if not self.HIGH_LEVEL_move_lin(return_pose):
                 self.get_logger().error("Failed to return to original position (Y)")
                 self.is_moving = False
                 return False
             time.sleep(0.5)
         
-        # # Move back in X
-        # if abs(dx_return) > 0.001:
-        #     if not self.HIGH_LEVEL_move_lin_relative(dx=dx_return):
-        #         self.get_logger().error("Failed to return to original position (X)")
-        #         self.is_moving = False
-        #         return False
-        #     time.sleep(0.5)
-        
-        # # Move back in Y
-        # if abs(dy_return) > 0.001:
-        #     if not self.HIGH_LEVEL_move_lin_relative(dy=dy_return):
-        #         self.get_logger().error("Failed to return to original position (Y)")
-        #         self.is_moving = False
-        #         return False
-        #     time.sleep(0.5)
         
         # ==================== DESCEND AND PLACE ====================
         self.get_logger().info("==================== PLACE BACK ====================")

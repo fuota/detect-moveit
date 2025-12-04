@@ -1116,10 +1116,83 @@ class MoveItController(Node, CollisionObjectMixin):
     
     # ==================== GRIPPER CONTROL ====================
     
-    def control_gripper(self, state, gripper_value=None):
-        """Control gripper state (open/close)"""
+    def is_robot_node_alive(self):
+        """Check if the robot hardware node is still alive by checking action server availability."""
+        try:
+            # Quick check if action server is still responding
+            test_client = ActionClient(self, MoveGroup, '/move_action')
+            is_alive = test_client.wait_for_server(timeout_sec=2.0)
+            test_client.destroy()
+            return is_alive
+        except Exception as e:
+            self.get_logger().error(f"Error checking robot node: {e}")
+            return False
+    
+    def control_gripper(self, state, gripper_value=None, max_retries=5):
+        """Control gripper state (open/close) with automatic retry on timeout errors.
+        
+        Only stops retrying when:
+        1. Operation succeeds
+        2. Robot node/process has died (action server unavailable)
+        3. Max retries exceeded
+        
+        Args:
+            state: "open" or "close"
+            gripper_value: Optional grip force (0.0-1.0) for close operation
+            max_retries: Maximum retry attempts (default: 5)
+        """
+        for attempt in range(max_retries):
+            if attempt > 0:
+                self.get_logger().warn(
+                    f"🔄 Retrying gripper operation (attempt {attempt + 1}/{max_retries})..."
+                )
+                # Check if robot node is still alive before retrying
+                if not self.is_robot_node_alive():
+                    self.get_logger().error(
+                        "❌ Robot node has died! Cannot retry gripper operation. "
+                        "Please restart the robot launch file."
+                    )
+                    return False
+                
+                # Wait for hardware to recover before retry
+                self.get_logger().info("Waiting 5s for hardware to recover before retry...")
+                for _ in range(50):  # 5 seconds of spinning
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                    time.sleep(0.1)
+            
+            result = self._try_gripper_operation(state, gripper_value)
+            
+            if result == "success":
+                return True
+            elif result == "node_dead":
+                self.get_logger().error(
+                    "❌ Robot node has died! Stopping gripper operation. "
+                    "Please restart the robot launch file."
+                )
+                return False
+            elif result == "retry":
+                # Timeout or stale state error - can retry
+                continue
+            else:  # "fail"
+                # Non-recoverable error
+                return False
+        
+        self.get_logger().error(
+            f"Gripper operation failed after {max_retries} attempts. "
+            f"Hardware may be experiencing persistent issues, but robot node is still alive."
+        )
+        return False
+    
+    def _try_gripper_operation(self, state, gripper_value=None):
+        """Execute a single gripper operation attempt.
+        
+        Returns:
+            "success" - operation succeeded
+            "retry" - operation failed with retryable error (timeout, stale state)
+            "node_dead" - robot node has died
+            "fail" - non-recoverable error
+        """
         # CRITICAL: Wait for hardware driver to stabilize before gripper operation
-        # The hardware driver often times out right after arm motions
         self.get_logger().info("Waiting for hardware driver to stabilize before gripper operation...")
         
         # First, check current hardware status
@@ -1128,55 +1201,49 @@ class MoveItController(Node, CollisionObjectMixin):
             self.get_logger().warn(f"Hardware status before gripper: {msg}")
         
         # Give hardware driver time to recover from previous motion
-        # Spin during the wait to process any pending messages - use longer wait time
         recovery_start = time.time()
-        recovery_time = 5.0  # Increased from 3.0s to 5.0s for more reliable recovery
+        recovery_time = 5.0
         while time.time() - recovery_start < recovery_time:
             rclpy.spin_once(self, timeout_sec=0.1)
             time.sleep(0.1)
         
-        # CRITICAL: Wait for fresh joint states before gripper operation
-        # Gripper operations fail with error -4 if joint states are stale
-        # Use max_age of 1.0s to match MoveIt's requirement
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            self.get_logger().info(f"Checking for fresh joint states (attempt {attempt + 1}/{max_attempts})...")
+        # Wait for fresh joint states - but don't fail if not available, just warn
+        max_state_attempts = 3
+        got_fresh_state = False
+        for state_attempt in range(max_state_attempts):
+            self.get_logger().info(f"Checking for fresh joint states (attempt {state_attempt + 1}/{max_state_attempts})...")
             
-            # Use max_age of 1.0s - MoveIt requires states within 1 second
             if self.wait_for_fresh_joint_state(timeout=10.0, max_age=1.0):
                 self.get_logger().info("✓ Hardware ready, proceeding with gripper operation")
+                got_fresh_state = True
                 break
             
-            if attempt < max_attempts - 1:
+            if state_attempt < max_state_attempts - 1:
                 self.get_logger().warn(
-                    f"Fresh joint state not available yet (attempt {attempt + 1}), "
+                    f"Fresh joint state not available yet (attempt {state_attempt + 1}), "
                     f"waiting longer for hardware to recover..."
                 )
-                # Spin more aggressively to receive messages
                 for _ in range(50):  # 5 seconds of spinning
                     rclpy.spin_once(self, timeout_sec=0.1)
                     time.sleep(0.1)
-            else:
-                self.get_logger().error(
-                    "Cannot control gripper - fresh joint state not available after multiple attempts. "
-                    "Hardware driver may be down or experiencing persistent timeouts. "
-                    "Please check robot connection and consider restarting the robot launch file."
-                )
-                return False
+        
+        if not got_fresh_state:
+            self.get_logger().warn(
+                "Could not get fresh joint state, but will try gripper operation anyway..."
+            )
         
         gripper_client = ActionClient(self, MoveGroup, '/move_action')
         
         if not gripper_client.wait_for_server(timeout_sec=5.0):
-            self.get_logger().error("Gripper action server not available!")
-            return False
+            self.get_logger().error("Gripper action server not available - robot node may have died!")
+            return "node_dead"
         
         goal = MoveGroup.Goal()
         goal.request.group_name = self.gripper_group_name
         goal.request.num_planning_attempts = 10
         goal.request.allowed_planning_time = 2.0
-        # CRITICAL: Slow down gripper to prevent timeout - gripper needs more time
-        goal.request.max_velocity_scaling_factor = 0.2  # Reduced from 0.5 to 0.2
-        goal.request.max_acceleration_scaling_factor = 0.2  # Reduced from 0.5 to 0.2
+        goal.request.max_velocity_scaling_factor = 0.2
+        goal.request.max_acceleration_scaling_factor = 0.2
         
         constraints = Constraints()
         
@@ -1194,99 +1261,66 @@ class MoveItController(Node, CollisionObjectMixin):
                     self.gripper_max_close_right * 0.6
                 ]
         else:
-            return False
+            gripper_client.destroy()
+            return "fail"
         
         for i, joint_name in enumerate(self.gripper_joint_names):
             joint_constraint = JointConstraint()
             joint_constraint.joint_name = joint_name
             joint_constraint.position = positions[i]
-            # CRITICAL: Increase tolerance to make it easier to reach goal and prevent timeout
-            joint_constraint.tolerance_above = 0.01  # Increased from 0.005
-            joint_constraint.tolerance_below = 0.01  # Increased from 0.005
+            joint_constraint.tolerance_above = 0.01
+            joint_constraint.tolerance_below = 0.01
             joint_constraint.weight = 1.0
             constraints.joint_constraints.append(joint_constraint)
         
         goal.request.goal_constraints.append(constraints)
         
-        # CRITICAL: Final check right before sending goal - states can become stale during planning
-        self.get_logger().info("Final check: Verifying joint states are still fresh before sending gripper goal...")
-        # Use max_age of 1.0s to match MoveIt's requirement
-        if not self.wait_for_fresh_joint_state(timeout=3.0, max_age=1.0):
-            self.get_logger().warn(
-                "Joint states became stale, waiting for hardware to recover..."
-            )
-            # Try one more recovery
-            for _ in range(30):  # 3 seconds of spinning
-                rclpy.spin_once(self, timeout_sec=0.1)
-                time.sleep(0.1)
-            
-            if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
-                self.get_logger().error(
-                    "Joint states still stale after recovery attempt. "
-                    "Hardware driver may be experiencing timeouts. Aborting gripper operation."
-                )
-                gripper_client.destroy()
-                return False
-        
-        self.get_logger().info("✓ Joint states confirmed fresh, sending gripper goal...")
+        self.get_logger().info("Sending gripper goal...")
         
         future = gripper_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
         
         if not future.done():
-            self.get_logger().error("Gripper goal send timed out")
+            self.get_logger().warn("Gripper goal send timed out - will retry")
             gripper_client.destroy()
-            return False
+            return "retry"
         
         goal_handle = future.result()
         if not goal_handle or not goal_handle.accepted:
-            self.get_logger().error("Gripper goal rejected")
+            self.get_logger().warn("Gripper goal rejected - will retry")
             gripper_client.destroy()
-            return False
+            return "retry"
         
-        # CRITICAL: Check again right before execution - hardware can timeout during planning
-        self.get_logger().info("Verifying hardware is still responsive before gripper execution...")
-        time.sleep(1.0)  # Brief pause - increased from 0.5s
-        # Use max_age of 1.0s to match MoveIt's requirement
-        if not self.wait_for_fresh_joint_state(timeout=3.0, max_age=1.0):
-            self.get_logger().warn(
-                "Joint states became stale during gripper planning. "
-                "Hardware driver may be timing out. Attempting recovery..."
-            )
-            # Try to recover
-            for _ in range(30):  # 3 seconds of spinning
-                rclpy.spin_once(self, timeout_sec=0.1)
-                time.sleep(0.1)
+        self.get_logger().info("Waiting for gripper execution...")
         
-        # CRITICAL: Increase timeout for gripper execution - grippers can take 10+ seconds
         result_future = goal_handle.get_result_async()
         rclpy.spin_until_future_complete(self, result_future, timeout_sec=15.0)
         
         if not result_future.done():
-            self.get_logger().error("Gripper execution timed out after 15 seconds")
+            self.get_logger().warn("Gripper execution timed out after 15 seconds - will retry")
             gripper_client.destroy()
-            return False
+            return "retry"
         
         result = result_future.result()
         gripper_client.destroy()
         
         error_code = result.result.error_code.val
         if error_code == MoveItErrorCodes.SUCCESS:
-            # CRITICAL: Brief wait after successful gripper operation to let hardware stabilize
-            self.get_logger().info("Gripper operation successful, waiting for hardware to stabilize...")
+            self.get_logger().info("✓ Gripper operation successful")
             time.sleep(1.0)
-            return True
+            return "success"
         else:
-            # Error code -4 means INVALID_ROBOT_STATE - joint states were stale
-            if error_code == -4:
-                self.get_logger().error(
-                    f"Gripper operation failed with error code -4 (INVALID_ROBOT_STATE). "
-                    f"This indicates joint states became stale during execution. "
-                    f"Hardware driver may have timed out. Please check robot connection."
+            # Error codes that indicate timeout/stale state - can retry
+            if error_code in [-4, -6]:  # INVALID_ROBOT_STATE, UNKNOWN
+                error_name = "INVALID_ROBOT_STATE" if error_code == -4 else "UNKNOWN"
+                self.get_logger().warn(
+                    f"Gripper operation returned error {error_code} ({error_name}). "
+                    f"This is typically a temporary hardware timeout - will retry..."
                 )
+                return "retry"
             else:
                 self.get_logger().error(f"Gripper operation failed with error code: {error_code}")
-            return False
+                return "fail"
     
     def open_gripper(self, openness=0.0):
         """Open gripper"""
