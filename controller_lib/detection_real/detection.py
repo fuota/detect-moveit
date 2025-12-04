@@ -74,6 +74,8 @@ class DetectObjectsPublisher(Node):
         self.ids_pub = self.create_publisher(Int32MultiArray, '/detected_objects/ids', 10)
         self.marker_viz_pub = self.create_publisher(MarkerArray, '/detected_objects/markers', 10)
         self.annotated_image_pub = self.create_publisher(Image, '/detected_objects/image', 10)
+        # New: Publish object map {id: {name, pose}} for easier UI consumption
+        self.object_map_pub = self.create_publisher(String, '/detected_objects/object_map', 10)
 
         # TF with cache
         self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=10.0))
@@ -116,12 +118,16 @@ class DetectObjectsPublisher(Node):
         names_list = []
         ids_msg = Int32MultiArray()
         marker_array = MarkerArray()
+        object_map = {}  # {id: {name, pose}} for easy UI consumption
 
         # Draw on image
         annotated_frame = frame.copy()
         if ids is not None:
             aruco.drawDetectedMarkers(annotated_frame, corners, ids)
 
+        # Get image dimensions for normalization
+        img_height, img_width = frame.shape[:2]
+        
         if ids is not None:
             self.get_logger().info(f"Detected marker IDs: {ids.flatten().tolist()}", 
                                   throttle_duration_sec=2.0)
@@ -129,6 +135,18 @@ class DetectObjectsPublisher(Node):
             for i, marker_id in enumerate(ids.flatten()):
                 if marker_id not in OBJECT_MAP:
                     continue
+
+                # Calculate marker center normalized to 0-1 range
+                marker_corners = corners[i][0]  # Shape: (4, 2) - 4 corners with x,y
+                center_x = float(np.mean(marker_corners[:, 0])) / img_width   # 0-1 range
+                center_y = float(np.mean(marker_corners[:, 1])) / img_height  # 0-1 range
+                
+                # Add to object map immediately (even if TF fails, UI can still show marker)
+                object_map[int(marker_id)] = {
+                    'name': OBJECT_MAP[marker_id],
+                    'x': center_x,  # X position normalized (0=left, 1=right)
+                    'y': center_y   # Y position normalized (0=top, 1=bottom)
+                }
 
                 # Estimate pose
                 rvec, tvec, _ = aruco.estimatePoseSingleMarkers(
@@ -203,6 +221,12 @@ class DetectObjectsPublisher(Node):
         names_msg = String()
         names_msg.data = json.dumps(names_list)
         self.names_pub.publish(names_msg)
+        
+        # Publish object map as JSON string {id: {name, x, y}}
+        # x, y are normalized 0-1 coordinates (0=left/top, 1=right/bottom)
+        object_map_msg = String()
+        object_map_msg.data = json.dumps(object_map)
+        self.object_map_pub.publish(object_map_msg)
 
         # Publish markers
         if len(marker_array.markers) > 0:
