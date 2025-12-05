@@ -284,6 +284,16 @@ class RealDetectionPickPlaceController(MoveItController):
             '/task_progress',
             10)
         
+        # Create publisher for robot's detected objects memory (long-term, all objects ever seen)
+        # Different from /detected_objects/object_map which is real-time visible objects
+        self.robot_objects_pub = self.create_publisher(
+            String,
+            '/robot/detected_objects',
+            10)
+        
+        # Timer to publish robot's object memory periodically
+        self.robot_objects_timer = self.create_timer(1.0, self.publish_robot_detected_objects)
+        
         # Subscribe to ArUco detection topics
         self.pose_sub = self.create_subscription(
             PoseArray,
@@ -332,11 +342,28 @@ class RealDetectionPickPlaceController(MoveItController):
             callback_group=self.callback_group
         )
         
+        # Emergency stop services
+        self.emergency_stop_service = self.create_service(
+            Trigger,
+            'emergency_stop',
+            self.emergency_stop_callback,
+            callback_group=self.callback_group
+        )
+        
+        self.reset_emergency_stop_service = self.create_service(
+            Trigger,
+            'reset_emergency_stop',
+            self.reset_emergency_stop_callback,
+            callback_group=self.callback_group
+        )
+        
         self.get_logger().info("Services available:")
         self.get_logger().info("  - /prepare_medicine")
         self.get_logger().info("  - /set_up_table")
         self.get_logger().info("  - /organize_books")
         self.get_logger().info("  - /get_available_tasks (returns task info)")
+        self.get_logger().info("  - /emergency_stop (STOP ROBOT)")
+        self.get_logger().info("  - /reset_emergency_stop (resume)")
         self.get_logger().info("Progress topic:")
         self.get_logger().info("  - /task_progress (std_msgs/String)")
         
@@ -390,6 +417,26 @@ class RealDetectionPickPlaceController(MoveItController):
                 return step.get('description', f"Step {step_number}")
         
         return f"Step {step_number}"
+    
+    def publish_robot_detected_objects(self):
+        """
+        Publish robot's long-term memory of all detected objects.
+        This is different from /detected_objects/object_map which shows real-time visible objects.
+        This topic shows ALL objects the robot has ever seen since startup.
+        
+        Format: {id: {name: str, has_pose: bool}}
+        """
+        robot_objects = {}
+        
+        for marker_id, obj_data in self.detected_objects.items():
+            robot_objects[int(marker_id)] = {
+                'name': obj_data.get('name', f'marker_{marker_id}'),
+                'has_pose': obj_data.get('pose') is not None
+            }
+        
+        msg = String()
+        msg.data = json.dumps(robot_objects)
+        self.robot_objects_pub.publish(msg)
     
     # ==================== SERVICE CALLBACKS ====================
 
@@ -456,6 +503,60 @@ class RealDetectionPickPlaceController(MoveItController):
         
         return response
     
+    def emergency_stop_callback(self, request, response):
+        """Service callback to trigger emergency stop"""
+        self.get_logger().error("🛑 EMERGENCY STOP SERVICE CALLED!")
+        
+        try:
+            self.trigger_emergency_stop()
+            self.is_moving = False  # Unblock pose updates
+            
+            response.success = True
+            response.message = "Emergency stop triggered - robot stopped"
+            
+            # Publish status
+            progress_msg = String()
+            progress_msg.data = json.dumps({
+                "task": "emergency_stop",
+                "status": "triggered",
+                "description": "Emergency stop - all operations halted"
+            })
+            self.task_progress_pub.publish(progress_msg)
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Emergency stop error: {str(e)}"
+            self.get_logger().error(f"Emergency stop error: {e}")
+        
+        return response
+    
+    def reset_emergency_stop_callback(self, request, response):
+        """Service callback to reset emergency stop"""
+        self.get_logger().info("Reset emergency stop requested")
+        
+        try:
+            if self.is_emergency_stopped():
+                self.reset_emergency_stop()
+                response.success = True
+                response.message = "Emergency stop reset - ready"
+                
+                progress_msg = String()
+                progress_msg.data = json.dumps({
+                    "task": "emergency_stop",
+                    "status": "reset",
+                    "description": "Ready for commands"
+                })
+                self.task_progress_pub.publish(progress_msg)
+            else:
+                response.success = True
+                response.message = "Emergency stop was not active"
+                
+        except Exception as e:
+            response.success = False
+            response.message = f"Reset error: {str(e)}"
+        
+        return response
+    
     # ==================== ARUCO DETECTION CALLBACKS ====================
     
     def pose_callback(self, msg: PoseArray):
@@ -473,7 +574,7 @@ class RealDetectionPickPlaceController(MoveItController):
                 msg.poses[i].position.x -= 0.010 #LAB CHANGE (11/25/2025 - organize books)
                 msg.poses[i].position.z -= 0.010 #LAB CHANGE (11/24/2025)
                 # msg.poses[i].position.y -= 0.03 #LAB CHANGE (11/24/2025 - prepare medicine)
-                msg.poses[i].position.y -= 0.040 #LAB CHANGE (11/24/2025 - organize books)
+                msg.poses[i].position.y -= 0.025 #LAB CHANGE (11/24/2025 - organize books)
                 self.detected_objects[marker_id]['pose'] = msg.poses[i]
                 # Only update collision if object is NOT picked and NOT moving
                 if marker_id not in self.picked_objects:

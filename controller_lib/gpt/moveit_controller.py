@@ -98,6 +98,9 @@ class MoveItController(Node, CollisionObjectMixin):
         # Collision object tracking
         self.collision_objects_added = set()
         
+        # Emergency stop state
+        self.emergency_stop_triggered = False
+        
         # Initialize MoveGroup action client
         self.move_group_client = ActionClient(self, MoveGroup, '/move_action')
         
@@ -285,6 +288,65 @@ class MoveItController(Node, CollisionObjectMixin):
         else:
             return (True, age, f"Hardware driver is responsive - joint state is {age:.2f}s old")
     
+    # ==================== EMERGENCY STOP ====================
+    
+    def trigger_emergency_stop(self):
+        """Trigger emergency stop - blocks all motion commands immediately."""
+        self.get_logger().error("🛑 EMERGENCY STOP TRIGGERED!")
+        self.emergency_stop_triggered = True
+        
+        # Send stop trajectory to halt robot
+        try:
+            self._send_stop_trajectory()
+        except Exception as e:
+            self.get_logger().warn(f"Error sending stop trajectory: {e}")
+        
+        self.get_logger().error("🛑 Emergency stop active - all motion blocked")
+        return True
+    
+    def _send_stop_trajectory(self):
+        """Send empty trajectory to stop robot immediately."""
+        from trajectory_msgs.msg import JointTrajectory
+        from std_msgs.msg import Header
+        
+        if not hasattr(self, '_stop_trajectory_pub'):
+            self._stop_trajectory_pub = self.create_publisher(
+                JointTrajectory,
+                '/joint_trajectory_controller/joint_trajectory',
+                10
+            )
+        
+        stop_msg = JointTrajectory()
+        stop_msg.header = Header()
+        stop_msg.header.stamp = self.get_clock().now().to_msg()
+        stop_msg.joint_names = [
+            'joint_1', 'joint_2', 'joint_3', 'joint_4', 
+            'joint_5', 'joint_6', 'joint_7'
+        ]
+        stop_msg.points = []
+        
+        self._stop_trajectory_pub.publish(stop_msg)
+        self.get_logger().info("Stop trajectory sent")
+    
+    def reset_emergency_stop(self):
+        """Reset emergency stop to resume normal operation."""
+        if self.emergency_stop_triggered:
+            self.get_logger().info("✓ Emergency stop reset - normal operation resumed")
+            self.emergency_stop_triggered = False
+            return True
+        return False
+    
+    def is_emergency_stopped(self):
+        """Check if emergency stop is active."""
+        return self.emergency_stop_triggered
+    
+    def check_emergency_stop(self):
+        """Check and log if emergency stop is active. Returns True if stopped."""
+        if self.emergency_stop_triggered:
+            self.get_logger().warn("Operation blocked - emergency stop active")
+            return True
+        return False
+    
     # ==================== POSE UTILITIES ====================
     
     def get_current_pose(self):
@@ -432,6 +494,9 @@ class MoveItController(Node, CollisionObjectMixin):
     
     def move_to_pose(self, target_pose, planning_time=7.0, max_retries=5):
         """Move arm to target pose; auto-retry if MoveIt returns INVALID_MOTION_PLAN."""
+        if self.check_emergency_stop():
+            return False
+        
         # CRITICAL: Wait for FRESH joint state before planning
         # MoveIt requires joint states < 1 second old for trajectory validation
         # If hardware driver is down, this will fail early with clear error
@@ -676,6 +741,8 @@ class MoveItController(Node, CollisionObjectMixin):
         Returns:
             bool: True if successful
         """
+        if self.check_emergency_stop():
+            return False
         # CRITICAL: Wait for FRESH joint state before planning
         # MoveIt requires joint states < 1 second old for trajectory validation
         if not self.wait_for_fresh_joint_state(timeout=5.0, max_age=1.0):
@@ -996,6 +1063,9 @@ class MoveItController(Node, CollisionObjectMixin):
         Returns:
             bool: True if successful
         """
+        if self.check_emergency_stop():
+            return False
+        
         self.get_logger().info("Executing Cartesian trajectory...")
         
         # CRITICAL: Check hardware is responsive before executing trajectory
@@ -1135,12 +1205,15 @@ class MoveItController(Node, CollisionObjectMixin):
         1. Operation succeeds
         2. Robot node/process has died (action server unavailable)
         3. Max retries exceeded
+        4. Emergency stop triggered
         
         Args:
             state: "open" or "close"
             gripper_value: Optional grip force (0.0-1.0) for close operation
             max_retries: Maximum retry attempts (default: 5)
         """
+        if self.check_emergency_stop():
+            return False
         for attempt in range(max_retries):
             if attempt > 0:
                 self.get_logger().warn(
