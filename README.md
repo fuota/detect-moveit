@@ -2,6 +2,12 @@
 
 This guide explains how to set up and run the ROS2 backend for the robot control system.
 
+**Important:** All commands in this guide should be run from the `detect-moveit` directory (the repository root). After cloning the repository, navigate to the directory:
+
+```bash
+cd detect-moveit
+```
+
 ## Prerequisites
 
 - ROS2 (Humble or later)
@@ -15,7 +21,6 @@ This guide explains how to set up and run the ROS2 backend for the robot control
 Before running the ROS nodes, install the required Python dependencies:
 
 ```bash
-cd /home/tamdo/carrt/detect-moveit
 pip3 install -r requirements.txt
 ```
 
@@ -109,7 +114,6 @@ After all 5 ROS nodes are running, execute the Python scripts:
 Starts the ArUco marker detection system that identifies objects in the camera view.
 
 ```bash
-cd /home/tamdo/carrt/detect-moveit
 python3 controller_lib/detection_real/detection.py
 ```
 
@@ -124,7 +128,6 @@ python3 controller_lib/detection_real/detection.py
 Starts the main robot controller that handles task execution.
 
 ```bash
-cd /home/tamdo/carrt/detect-moveit
 python3 controller_lib/controller/real_detection_pick_place.py
 ```
 
