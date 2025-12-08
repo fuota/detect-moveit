@@ -1,5 +1,15 @@
 # ROS2 Backend Setup Guide
 
+## Project Overview
+
+This project provides a ROS2-based robotic manipulation system for autonomous pick-and-place operations. The system uses ArUco marker detection to identify objects in the workspace and executes complex manipulation tasks such as:
+
+- **Medicine Preparation:** Placing water cups, plates, and pouring liquids
+- **Table Setup:** Organizing tableware (bowls, forks, spoons) in serving areas
+- **Book Organization:** Placing books in bookshelf compartments
+
+The system integrates with a web/mobile UI through ROSBridge, allowing users to monitor task progress in real-time and trigger tasks remotely. The backend handles object detection, motion planning with MoveIt2, and collision avoidance to ensure safe and accurate manipulation.
+
 This guide explains how to set up and run the ROS2 backend for the robot control system.
 
 **Important:** All commands in this guide should be run from the `detect-moveit` directory (the repository root). After cloning the repository, navigate to the directory:
@@ -8,9 +18,21 @@ This guide explains how to set up and run the ROS2 backend for the robot control
 cd detect-moveit
 ```
 
+## Hardware Requirements
+
+This project is designed to work with:
+- **Robot:** Kinova Gen3 7-DOF robotic arm
+- **Gripper:** Robotiq 2F-85 adaptive gripper
+- **Camera:** Intel RealSense depth camera (mounted on end effector)
+
+**Network Requirements:**
+- The control computer and the robot must be connected to the **same WiFi network**
+- The robot must have a **static IP address** (default: `192.168.0.10`)
+- Ensure the control computer can ping the robot's IP address before starting
+
 ## Prerequisites
 
-- ROS2 (Humble or later)
+- ROS2 (Humble)
 - RealSense camera drivers (`realsense2_camera`)
 - Kinova Gen3 robot MoveIt configuration
 - Python 3.8 or later
@@ -32,6 +54,47 @@ pip3 install -r requirements.txt
 - `reportlab` - PDF generation (for ArUco marker generation)
 
 **Note:** If you're using a virtual environment or conda, activate it before installing dependencies.
+
+## Environment Configuration
+
+Before running the system, you need to configure the static environment to match your physical setup.
+
+### Workspace Table Setup
+
+The system uses a workspace table where objects are placed. The default workspace table parameters are defined in `controller_lib/controller/real_detection_pick_place.py`:
+
+```python
+self.workspace_table = {
+    'dx': 0.43,      # X position offset from base (meters)
+    'dy': -0.31,     # Y position offset from base (meters)
+    'dz': -0.37,     # Z position offset from base (meters)
+    'width': 0.55,   # Table width (meters)
+    'depth': 0.55,   # Table depth (meters)
+    'height': 0.63  # Table height (meters)
+}
+```
+
+**Important:** Measure your actual workspace table dimensions and position relative to the robot base, then update these values in the code.
+
+### Static Environment Configuration
+
+The `setup_static_environment()` method in `controller_lib/controller/real_detection_pick_place.py` defines collision objects for:
+- Wheelchair (seat and back)
+- Big table
+- Workspace table
+- Wall
+
+**You must modify these values to match your actual physical environment:**
+
+1. Open `controller_lib/controller/real_detection_pick_place.py`
+2. Locate the `setup_static_environment()` method (around line 1287)
+3. Update the position and dimensions of:
+   - `wheel_chair_seat` and `wheel_chair_back` (if applicable)
+   - `big_table` (if present in your setup)
+   - `workspace_table` (must match your actual table)
+   - `wall` (if present)
+
+All measurements are in meters relative to the robot's base frame (`base_link`). Use a measuring tool to get accurate dimensions and positions.
 
 ## Setup Instructions
 
@@ -61,7 +124,10 @@ ros2 launch kinova_gen3_7dof_robotiq_2f_85_moveit_config robot.launch.py \
 - Starts MoveIt for motion planning and execution
 - Enables the Robotiq 2F-85 gripper control
 
-**Note:** Update `robot_ip` if your robot has a different IP address.
+**Note:** 
+- Update `robot_ip` if your robot has a different IP address
+- Ensure your computer and robot are on the same WiFi network
+- Verify connectivity by pinging the robot: `ping 192.168.0.10`
 
 ---
 
@@ -160,8 +226,14 @@ Once everything is running, you can test the system:
 
 ## Troubleshooting
 
-- **Robot connection issues:** Verify the robot IP address and network connectivity
+- **Robot connection issues:** 
+  - Verify the robot IP address and network connectivity
+  - Ensure both computer and robot are on the same WiFi network
+  - Check robot IP configuration matches the launch file parameter
+  - Test connectivity: `ping <robot_ip>`
 - **Camera not detected:** Check USB connection and ensure RealSense drivers are installed
 - **Transform errors:** Ensure both transform publishers are running before starting detection
 - **ROSBridge connection:** Verify port 9090 is not in use by another application
+- **Collision detection issues:** Verify static environment parameters in `real_detection_pick_place.py` match your physical setup
+- **Workspace table errors:** Ensure workspace table dimensions and position are correctly configured
 
