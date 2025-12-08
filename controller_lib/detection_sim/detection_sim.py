@@ -20,6 +20,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 import json
 import yaml
 import os
+from std_srvs.srv import Trigger
 
 
 # Default object name mapping
@@ -37,6 +38,8 @@ class SimulatedDetectionPublisher(Node):
         self.declare_parameter('detection_rate', 5.0)  # Hz
         self.declare_parameter('marker_size', 0.025)  # meters
         self.declare_parameter('config_file', '')  # Optional YAML config file
+        self.declare_parameter('clear_on_start', False)  # clear objects at startup
+
         
         detection_rate = self.get_parameter('detection_rate').value
         self.marker_size = self.get_parameter('marker_size').value
@@ -61,7 +64,13 @@ class SimulatedDetectionPublisher(Node):
 
         # Timer for periodic publishing
         self.timer = self.create_timer(1.0 / detection_rate, self.publish_detections)
-        
+        # Clear service
+        self.clear_srv = self.create_service(Trigger, '~/clear_objects', self.handle_clear_objects)
+
+        # Optionally clear at startup
+        if self.get_parameter('clear_on_start').value:
+            self.clear_objects()
+
         self.get_logger().info(f"Simulated Detection Publisher started (rate: {detection_rate} Hz)")
         self.get_logger().info(f"Simulating {len(self.simulated_objects)} objects:")
         for obj in self.simulated_objects:
@@ -69,10 +78,11 @@ class SimulatedDetectionPublisher(Node):
             name = self.object_map.get(obj_id, f"marker_{obj_id}")
             pose = obj['pose']
             self.get_logger().info(
-                f"  [{obj_id}] {name} at ({pose['x']:.3f}, {pose['y']:.3f}, {pose['z']:.3f})")
+                f"  [{obj_id}] {name} at ({float(pose['x']):.3f}, {float(pose['y']):.3f}, {float(pose['z']):.3f})")
 
     def load_config_from_yaml(self, config_file):
         """Load configuration from YAML file"""
+        self.get_logger().info(f"Loading configuration from: {config_file}")
         try:
             with open(config_file, 'r') as f:
                 config = yaml.safe_load(f)
@@ -112,9 +122,9 @@ class SimulatedDetectionPublisher(Node):
             {
                 'id': 6,  # water_bottle
                 'pose': {
-                    'x': 0.6,
-                    'y': -0.5,
-                    'z': 0.625,  # table_z + table_height/2 + cylinder_height/2
+                    'x': 0.7,
+                    'y': -0.02,
+                    'z': 0.29,  # table_z + table_height/2 + cylinder_height/2
                     'qx': 0.0,
                     'qy': 0.0,
                     'qz': 0.0,
@@ -229,12 +239,24 @@ class SimulatedDetectionPublisher(Node):
         marker.lifetime = rclpy.duration.Duration(seconds=0.5).to_msg()
         
         return marker
+    
+    def clear_objects(self):
+        """Clear all detected objects"""
+        self.simulated_objects = []
+        self.get_logger().info("Cleared all simulated objects.")
+
+    def handle_clear_objects(self, request, response):
+        """Service callback to clear simulated objects at runtime"""
+        self.clear_objects()
+        response.success = True
+        response.message = "Simulated objects cleared."
+        return response
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = SimulatedDetectionPublisher()
-    
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
